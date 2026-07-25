@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { afterEach, describe, it } from "node:test"
+import { afterEach, beforeEach, describe, it } from "node:test"
 import {
   chmodSync,
   mkdirSync,
@@ -16,6 +16,7 @@ import {
   buildAccountLabels,
   keychainSuffixForDir,
   parseCredentials,
+  readAllClaudeAccounts as readAllClaudeAccountsReal,
   readCredentialsFile,
   updateCredentialBlob,
   writeBackCredentials,
@@ -582,6 +583,19 @@ describe("updateCredentialBlob", () => {
 })
 
 describe("writeBackCredentials (file source)", () => {
+  // These tests isolate via HOME; unset CLAUDE_CONFIG_DIR so an ambient value
+  // (e.g. in CI or a dev shell) doesn't redirect the credentials path.
+  let savedConfigDir: string | undefined
+  beforeEach(() => {
+    savedConfigDir = process.env.CLAUDE_CONFIG_DIR
+    delete process.env.CLAUDE_CONFIG_DIR
+  })
+  afterEach(() => {
+    if (typeof savedConfigDir === "string")
+      process.env.CLAUDE_CONFIG_DIR = savedConfigDir
+    else delete process.env.CLAUDE_CONFIG_DIR
+  })
+
   it("reads, updates, and writes back credentials to file", async () => {
     const originalHome = process.env.HOME
     const tempHome = await mkdtemp(join(tmpdir(), "opencode-claude-auth-wb-"))
@@ -711,6 +725,100 @@ describe("writeBackCredentials (file source)", () => {
         delete process.env.HOME
       }
       rmSync(tempHome, { recursive: true, force: true })
+    }
+  })
+
+  it("uses CLAUDE_CONFIG_DIR when set", async () => {
+    const originalHome = process.env.HOME
+    const originalConfigDir = process.env.CLAUDE_CONFIG_DIR
+    const tempHome = await mkdtemp(
+      join(tmpdir(), "opencode-claude-auth-wb-home-"),
+    )
+    const configDir = await mkdtemp(
+      join(tmpdir(), "opencode-claude-auth-wb-cfg-"),
+    )
+    process.env.HOME = tempHome
+    process.env.CLAUDE_CONFIG_DIR = configDir
+
+    try {
+      // Credentials live in CLAUDE_CONFIG_DIR, not ~/.claude
+      const credPath = join(configDir, ".credentials.json")
+      writeFileSync(
+        credPath,
+        JSON.stringify({
+          claudeAiOauth: {
+            accessToken: "old-at",
+            refreshToken: "old-rt",
+            expiresAt: 1000,
+          },
+        }),
+        { encoding: "utf-8", mode: 0o600 },
+      )
+
+      const result = writeBackCredentials("file", {
+        accessToken: "new-at",
+        refreshToken: "new-rt",
+        expiresAt: 2000,
+      })
+
+      assert.equal(result, true)
+      const written = JSON.parse(readFileSync(credPath, "utf-8"))
+      assert.equal(written.claudeAiOauth.accessToken, "new-at")
+    } finally {
+      if (typeof originalHome === "string") process.env.HOME = originalHome
+      else delete process.env.HOME
+      if (typeof originalConfigDir === "string")
+        process.env.CLAUDE_CONFIG_DIR = originalConfigDir
+      else delete process.env.CLAUDE_CONFIG_DIR
+      rmSync(tempHome, { recursive: true, force: true })
+      rmSync(configDir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("readAllClaudeAccounts (file source)", () => {
+  it("reads credentials from CLAUDE_CONFIG_DIR when set", async () => {
+    // Non-darwin reads go straight to the credentials file; on darwin the
+    // keychain is tried first, so this only asserts deterministically off-mac.
+    if (process.platform === "darwin") return
+
+    const originalHome = process.env.HOME
+    const originalConfigDir = process.env.CLAUDE_CONFIG_DIR
+    const tempHome = await mkdtemp(
+      join(tmpdir(), "opencode-claude-auth-rd-home-"),
+    )
+    const configDir = await mkdtemp(
+      join(tmpdir(), "opencode-claude-auth-rd-cfg-"),
+    )
+    process.env.HOME = tempHome
+    process.env.CLAUDE_CONFIG_DIR = configDir
+
+    try {
+      writeFileSync(
+        join(configDir, ".credentials.json"),
+        JSON.stringify({
+          claudeAiOauth: {
+            accessToken: "cfg-at",
+            refreshToken: "cfg-rt",
+            expiresAt: 1700000000000,
+            subscriptionType: "pro",
+          },
+        }),
+        { encoding: "utf-8", mode: 0o600 },
+      )
+
+      const accounts = readAllClaudeAccountsReal()
+      assert.equal(accounts.length, 1)
+      assert.equal(accounts[0].source, "file")
+      assert.equal(accounts[0].credentials.accessToken, "cfg-at")
+    } finally {
+      if (typeof originalHome === "string") process.env.HOME = originalHome
+      else delete process.env.HOME
+      if (typeof originalConfigDir === "string")
+        process.env.CLAUDE_CONFIG_DIR = originalConfigDir
+      else delete process.env.CLAUDE_CONFIG_DIR
+      rmSync(tempHome, { recursive: true, force: true })
+      rmSync(configDir, { recursive: true, force: true })
     }
   })
 })

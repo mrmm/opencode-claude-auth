@@ -34,10 +34,6 @@ export function initAccounts(accounts: ClaudeAccount[]): void {
   allAccounts = accounts
 }
 
-export function getAccounts(): ClaudeAccount[] {
-  return allAccounts
-}
-
 export function setActiveAccountSource(source: string): void {
   const previous = activeAccountSource
   activeAccountSource = source
@@ -49,7 +45,14 @@ export function setActiveAccountSource(source: string): void {
 }
 
 export function refreshAccountsList(): ClaudeAccount[] {
-  allAccounts = readAllClaudeAccounts()
+  const fresh = readAllClaudeAccounts()
+  if (fresh.length === 0 && allAccounts.length > 0) {
+    // Transient empty read (e.g. keychain race while the claude CLI rewrites
+    // credentials) must not clobber a working session.
+    log("accounts_reload_empty", { keptAccounts: allAccounts.length })
+    return allAccounts
+  }
+  allAccounts = fresh
   return allAccounts
 }
 
@@ -336,6 +339,72 @@ export function getCredentialsForSync(): ClaudeCredentials | null {
 
   // Credentials are near expiry -- don't refresh here, let the per-request path handle it
   return null
+}
+
+/**
+ * Re-read only the active account's credentials from its source (single
+ * keychain service read or credentials file) and update them in place.
+ * Used on 401 so an externally refreshed token is picked up without a
+ * full multi-account keychain rescan.
+ */
+export function reloadActiveAccount(): void {
+  const account = getActiveAccount()
+  if (!account) return
+  try {
+    const fresh = refreshAccount(account.source)
+    if (fresh) account.credentials = fresh
+  } catch (err) {
+    log("account_reload_failed", {
+      source: account.source,
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+}
+
+/**
+ * Refresh the active account's credentials via OAuth even though they
+ * still look valid locally. Used on 401 when the source still holds the
+ * rejected token (revoked, the claude CLI hasn't refreshed it yet).
+ * On success the account, its source, and the cache are all updated.
+ * The refresh function is injectable for tests.
+ */
+export function forceRefreshActiveAccount(
+  refresh: (refreshToken: string) => ClaudeCredentials | null = refreshViaOAuth,
+): ClaudeCredentials | null {
+  const account = getActiveAccount()
+  if (!account?.credentials.refreshToken) return null
+
+  const oauthCreds = refresh(account.credentials.refreshToken)
+  if (oauthCreds && oauthCreds.expiresAt > Date.now() + 60_000) {
+    account.credentials = oauthCreds
+    if (!writeBackCredentials(account.source, oauthCreds)) {
+      // Session continues from memory/cache; a later source re-read may
+      // resurrect the rejected token and trigger another refresh.
+      log("force_refresh_writeback_failed", { source: account.source })
+    }
+    accountCacheMap.set(account.source, {
+      creds: oauthCreds,
+      cachedAt: Date.now(),
+    })
+    return oauthCreds
+  }
+
+  log("force_refresh_failed", { source: account.source })
+  return null
+}
+
+/**
+ * Drop the active account's cached credentials so the next
+ * getCachedCredentials() call re-reads from the source, bypassing the
+ * 30s TTL. Used when the API rejects a token (401) that still looks
+ * valid locally.
+ */
+export function invalidateCredentialCache(): void {
+  const account = getActiveAccount()
+  if (account) {
+    accountCacheMap.delete(account.source)
+    log("cache_invalidated", { source: account.source })
+  }
 }
 
 export function getCachedCredentials(): ClaudeCredentials | null {

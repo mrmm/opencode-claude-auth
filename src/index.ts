@@ -11,10 +11,17 @@ import {
   isLongContextError,
   LONG_CONTEXT_BETAS,
 } from "./betas.ts"
-import { transformBody, transformResponseStream } from "./transforms.ts"
 import {
+  SYSTEM_IDENTITY,
+  transformBody,
+  transformResponseStream,
+} from "./transforms.ts"
+import {
+  forceRefreshActiveAccount,
   getCachedCredentials,
   getCredentialsForSync,
+  invalidateCredentialCache,
+  reloadActiveAccount,
   syncAuthJson,
   initAccounts,
   setActiveAccountSource,
@@ -35,6 +42,7 @@ export {
 export { resetExcludedBetas } from "./betas.ts"
 export {
   stripToolPrefix,
+  SYSTEM_IDENTITY,
   transformBody,
   transformResponseStream,
 } from "./transforms.ts"
@@ -50,9 +58,6 @@ export {
   computeVersionSuffix,
   extractFirstUserMessageText,
 } from "./signing.ts"
-
-const SYSTEM_IDENTITY_PREFIX =
-  "You are Claude Code, Anthropic's official CLI for Claude."
 
 function getCliVersion(): string {
   return process.env.ANTHROPIC_CLI_VERSION ?? config.ccVersion
@@ -282,10 +287,10 @@ const plugin: Plugin = async () => {
       }
 
       const hasIdentityPrefix = output.system.some((entry) =>
-        entry.includes(SYSTEM_IDENTITY_PREFIX),
+        entry.includes(SYSTEM_IDENTITY),
       )
       if (!hasIdentityPrefix) {
-        output.system.unshift(SYSTEM_IDENTITY_PREFIX)
+        output.system.unshift(SYSTEM_IDENTITY)
       }
     },
     auth: {
@@ -379,7 +384,24 @@ const plugin: Plugin = async () => {
             // This handles the common case of token expiry mid-session.
             if (response.status === 401) {
               log("fetch_401_retry", { modelId })
-              const refreshed = getCachedCredentials()
+              // The server rejected a token that may still look valid
+              // locally: bypass the 30s cache and re-read the active
+              // account's source (single keychain read, no full rescan) so
+              // an externally refreshed token (e.g. by the claude CLI) is
+              // picked up.
+              invalidateCredentialCache()
+              reloadActiveAccount()
+              // When refreshed is null, refreshIfNeeded already exhausted the
+              // OAuth (+ CLI) refresh paths — skipping the force-refresh
+              // below is intentional, not a missed recovery.
+              let refreshed = getCachedCredentials()
+              if (refreshed && refreshed.accessToken === latest.accessToken) {
+                // The source still holds the rejected token (revoked, the
+                // claude CLI hasn't refreshed it): try one direct OAuth
+                // refresh before giving up. Bounded to a single attempt per
+                // 401 response.
+                refreshed = forceRefreshActiveAccount() ?? refreshed
+              }
               if (refreshed && refreshed.accessToken !== latest.accessToken) {
                 const retryHeaders = buildRequestHeaders(
                   input,

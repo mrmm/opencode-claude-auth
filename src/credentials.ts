@@ -9,17 +9,18 @@ import {
 import { homedir, tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import {
+  PRIMARY_SERVICE,
   readAllClaudeAccounts,
   refreshAccount,
   writeBackCredentials,
-  type ClaudeCredentials,
   type ClaudeAccount,
+  type ClaudeCredentials,
 } from "./keychain.ts"
 import { resetExcludedBetas } from "./betas.ts"
 import { log } from "./logger.ts"
 
-export type { ClaudeCredentials } from "./keychain.ts"
 export type { ClaudeAccount } from "./keychain.ts"
+export type { ClaudeCredentials } from "./keychain.ts"
 
 const CREDENTIAL_CACHE_TTL_MS = 30_000
 
@@ -159,11 +160,6 @@ export function syncAuthJson(creds: ClaudeCredentials): void {
 export const OAUTH_TOKEN_URL = "https://claude.ai/v1/oauth/token"
 export const OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
-/**
- * Parse a raw OAuth token response into ClaudeCredentials.
- * Returns null if the response is missing a valid access_token.
- * Defaults expires_in to 36000s (10h) to match observed Claude token lifetime.
- */
 export function parseOAuthResponse(
   raw: string,
   currentRefreshToken: string,
@@ -193,8 +189,6 @@ export function parseOAuthResponse(
 export function refreshViaOAuth(
   refreshToken: string,
 ): ClaudeCredentials | null {
-  // Use a Node subprocess to perform the HTTP request synchronously.
-  // The refresh token is passed via stdin to avoid exposure in process args.
   const script = `
     process.stdin.resume();
     let input = '';
@@ -245,29 +239,44 @@ export function refreshViaOAuth(
   }
 }
 
-function refreshViaCli(): void {
+function refreshViaCli(configDir?: string, requireConfigDir = false): boolean {
+  if (requireConfigDir && !configDir) {
+    log("refresh_cli_skipped", {
+      source: "cli",
+      reason: "configDir unknown for suffixed account",
+    })
+    return false
+  }
+
+  const env = {
+    ...process.env,
+    TERM: "dumb",
+    ...(configDir ? { CLAUDE_CONFIG_DIR: configDir } : {}),
+  }
+
   const maxAttempts = 2
   for (let i = 0; i < maxAttempts; i++) {
-    log("refresh_started", { source: "cli", attempt: i + 1 })
+    log("refresh_started", { source: "cli", attempt: i + 1, configDir })
     try {
       execSync("claude -p . --model haiku", {
         timeout: 60_000,
         encoding: "utf-8",
-        env: { ...process.env, TERM: "dumb" },
+        env,
         stdio: "ignore",
         cwd: tmpdir(),
       })
       log("refresh_success", { source: "cli" })
-      return
+      return true
     } catch (err) {
       log("refresh_failed", {
         source: "cli",
         attempt: i + 1,
         error: err instanceof Error ? err.message : String(err),
       })
-      // Non-fatal: retry once, then give up
     }
   }
+  log("refresh_cli_exhausted", { source: "cli", configDir })
+  return false
 }
 
 export function refreshIfNeeded(
@@ -295,20 +304,46 @@ export function refreshIfNeeded(
     expiresIn: creds.expiresAt - Date.now(),
   })
 
-  // Try direct OAuth refresh first (zero LLM tokens consumed)
   if (creds.refreshToken) {
     const oauthCreds = refreshViaOAuth(creds.refreshToken)
     if (oauthCreds && oauthCreds.expiresAt > Date.now() + 60_000) {
       target.credentials = oauthCreds
-      writeBackCredentials(target.source, oauthCreds)
+      writeBackCredentials(target.source, oauthCreds, target.configDir)
       return oauthCreds
     }
   }
 
-  // Fall back to CLI-based refresh (consumes Haiku tokens)
   log("refresh_fallback_cli", { source: target.source })
-  refreshViaCli()
-  const refreshed = refreshAccount(target.source)
+  const isSuffixedAccount =
+    target.source !== PRIMARY_SERVICE &&
+    target.source.startsWith(PRIMARY_SERVICE + "-")
+  const cliSucceeded = refreshViaCli(target.configDir, isSuffixedAccount)
+  if (!cliSucceeded) {
+    const fallback = tryFallbackAccount(target.source)
+    if (fallback) {
+      target.credentials = fallback
+      return fallback
+    }
+
+    log("refresh_exhausted", {
+      source: target.source,
+      hadCredentials: false,
+      expiresAt: undefined,
+    })
+    return null
+  }
+
+  let refreshed = refreshAccount(target.source, target.configDir)
+  if (
+    (!refreshed || refreshed.expiresAt <= Date.now() + 60_000) &&
+    isSuffixedAccount
+  ) {
+    const primaryRefreshed = refreshAccount(PRIMARY_SERVICE)
+    if (primaryRefreshed && primaryRefreshed.expiresAt > Date.now() + 60_000) {
+      refreshed = primaryRefreshed
+    }
+  }
+
   if (refreshed && refreshed.expiresAt > Date.now() + 60_000) {
     target.credentials = refreshed
     return refreshed
@@ -322,12 +357,45 @@ export function refreshIfNeeded(
   return null
 }
 
-/**
- * Returns the active account's credentials for auth.json sync purposes.
- * Unlike getCachedCredentials(), this does NOT trigger a refresh.
- * It returns the account's current in-memory credentials if they're still valid.
- * Returns null if no account or credentials are expired.
- */
+function tryFallbackAccount(excludeSource: string): ClaudeCredentials | null {
+  const now = Date.now()
+  const candidates = allAccounts.filter((a) => a.source !== excludeSource)
+
+  // Accounts whose in-memory credentials are still valid can be borrowed
+  // directly — no keychain read needed. A 401 on a borrowed token is
+  // handled by the existing reload-and-retry fetch path.
+  for (const account of candidates) {
+    if (account.credentials.expiresAt > now + 60_000) {
+      log("refresh_fallback_account", {
+        failedSource: excludeSource,
+        usedSource: account.source,
+      })
+      return account.credentials
+    }
+  }
+
+  // Last resort: live-read the stale-looking ones too — another process
+  // (e.g. the Claude CLI in a different terminal) may have refreshed their
+  // keychain entry since we last read it.
+  for (const account of candidates) {
+    let fresh: ClaudeCredentials | null = null
+    try {
+      fresh = refreshAccount(account.source, account.configDir)
+    } catch {
+      continue
+    }
+    if (fresh && fresh.expiresAt > now + 60_000) {
+      account.credentials = fresh
+      log("refresh_fallback_account", {
+        failedSource: excludeSource,
+        usedSource: account.source,
+      })
+      return fresh
+    }
+  }
+  return null
+}
+
 export function getCredentialsForSync(): ClaudeCredentials | null {
   const account = getActiveAccount()
   if (!account) return null
@@ -337,7 +405,6 @@ export function getCredentialsForSync(): ClaudeCredentials | null {
     return creds
   }
 
-  // Credentials are near expiry -- don't refresh here, let the per-request path handle it
   return null
 }
 

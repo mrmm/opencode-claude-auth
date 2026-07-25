@@ -49,11 +49,11 @@ function resolveAccount(
 function buildSelectOptions(
   accounts: Account[],
   activeSource: string,
-): Array<{ label: string; value: string; hint: string }> {
+): Array<{ label: string; value: string; hint?: string }> {
   return accounts.map((a) => ({
     label: a.label,
     value: a.source,
-    hint: a.source === activeSource ? `${a.source} (active)` : a.source,
+    hint: a.source === activeSource ? "active" : undefined,
   }))
 }
 
@@ -190,6 +190,8 @@ let credentials = {
   expiresAt: ${initialExpiresAt}
 }
 
+export const PRIMARY_SERVICE = "Claude Code-credentials"
+
 export function readAllClaudeAccounts() {
   readCount += 1
   return [{ label: "Account 1", source: "Claude Code-credentials", credentials }]
@@ -285,7 +287,8 @@ describe("exported helpers", () => {
     await copySourceFiles(tempDir)
     await writeFile(
       tempKeychain,
-      `export function readAllClaudeAccounts() { return [{ label: "Account 1", source: "Claude Code-credentials", credentials: { accessToken: "token", refreshToken: "refresh", expiresAt: 1 } }] }
+      `export const PRIMARY_SERVICE = "Claude Code-credentials"
+export function readAllClaudeAccounts() { return [{ label: "Account 1", source: "Claude Code-credentials", credentials: { accessToken: "token", refreshToken: "refresh", expiresAt: 1 } }] }
 export function refreshAccount() { return null }
 export function writeBackCredentials() { return true }
 export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account \${i + 1}\`) }
@@ -1195,14 +1198,14 @@ describe("auth hook — select prompt options", () => {
     assert.equal(options[1].value, "Claude Code-credentials-b28bbb7c")
   })
 
-  it("marks the active account with (active) in its hint", () => {
+  it("marks the active account in its hint", () => {
     const options = buildSelectOptions(
       accounts,
       "Claude Code-credentials-b28bbb7c",
     )
-    assert.ok(options[1].hint.includes("(active)"))
-    assert.ok(!options[0].hint.includes("(active)"))
-    assert.ok(!options[2].hint.includes("(active)"))
+    assert.equal(options[1].hint, "active")
+    assert.equal(options[0].hint, undefined)
+    assert.equal(options[2].hint, undefined)
   })
 
   it("shows no prompts when only one account exists", () => {

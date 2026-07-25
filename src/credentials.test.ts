@@ -51,20 +51,36 @@ async function loadCredentialsWithCountingKeychain(
   const tempDir = await mkdtemp(join(tmpdir(), "opencode-claude-auth-creds-"))
   const tempKeychain = join(tempDir, "keychain.ts")
   const tempBetas = join(tempDir, "betas.ts")
+  const tempChildProcess = join(tempDir, "child-process.ts")
   const tempLogger = join(tempDir, "logger.ts")
   const tempCredentials = join(tempDir, "credentials.ts")
   const sourceCredentials = await readFile(
     new URL("./credentials.ts", import.meta.url),
     "utf8",
   )
-  const rewritten = sourceCredentials.replace(
-    /from\s+["']\.\/(\w+)\.js["']/g,
-    'from "./$1.ts"',
-  )
+  const rewritten = sourceCredentials
+    .replace(/from\s+["']\.\/(\w+)\.js["']/g, 'from "./$1.ts"')
+    .replace(
+      'import { execFileSync, execSync } from "node:child_process"',
+      'import { execFileSync, execSync } from "./child-process.ts"',
+    )
 
   await writeFile(
     tempLogger,
     `export function log() {}\nexport function initLogger() {}\nexport function closeLogger() {}\n`,
+    "utf8",
+  )
+
+  await writeFile(
+    tempChildProcess,
+    `export function execFileSync() {
+  throw new Error("oauth disabled in test harness")
+}
+
+export function execSync() {
+  return ""
+}
+`,
     "utf8",
   )
 
@@ -80,6 +96,8 @@ let credentials = {
   refreshToken: "refresh",
   expiresAt: ${initialExpiresAt}
 }
+
+export const PRIMARY_SERVICE = "Claude Code-credentials"
 
 export function readAllClaudeAccounts() {
   readCount += 1
@@ -568,6 +586,103 @@ describe("credential caching", () => {
     )
   })
 
+  it("refreshIfNeeded borrows a fallback account whose keychain entry was refreshed externally", async () => {
+    const originalNow = Date.now
+    const now = 1_700_000_000_000
+    Date.now = () => now
+
+    try {
+      const { credentialsModule, keychainModule } =
+        await loadCredentialsWithCountingKeychain(now - 1_000)
+
+      // Active account: suffixed keychain entry with an unknown configDir,
+      // so the CLI refresh is skipped (requireConfigDir) and OAuth is
+      // disabled by the harness. Fallback account: its in-memory expiry is
+      // stale too, but the live keychain read returns credentials that were
+      // refreshed externally (e.g. by the Claude CLI in another terminal).
+      credentialsModule.initAccounts([
+        {
+          label: "Account 1",
+          source: "Claude Code-credentials-aabbccdd",
+          credentials: {
+            accessToken: "stale-suffixed",
+            refreshToken: "rt-suffixed",
+            expiresAt: now - 1_000,
+          },
+        },
+        {
+          label: "Account 2",
+          source: "Claude Code-credentials",
+          credentials: {
+            accessToken: "stale-primary",
+            refreshToken: "rt-primary",
+            expiresAt: now - 1_000,
+          },
+        },
+      ])
+
+      keychainModule.__setCredentials({
+        accessToken: "externally-refreshed",
+        refreshToken: "rt-new",
+        expiresAt: now + 8 * 60 * 60_000,
+      })
+
+      const result = credentialsModule.refreshIfNeeded()
+
+      assert.equal(
+        result?.accessToken,
+        "externally-refreshed",
+        "stale in-memory expiry must not prevent a live fallback keychain read",
+      )
+    } finally {
+      Date.now = originalNow
+    }
+  })
+
+  it("fallback uses a valid in-memory account without a keychain read", async () => {
+    const originalNow = Date.now
+    const now = 1_700_000_000_000
+    Date.now = () => now
+
+    try {
+      const { credentialsModule, keychainModule } =
+        await loadCredentialsWithCountingKeychain(now - 1_000)
+
+      credentialsModule.initAccounts([
+        {
+          label: "Account 1",
+          source: "Claude Code-credentials-aabbccdd",
+          credentials: {
+            accessToken: "stale-suffixed",
+            refreshToken: "rt-suffixed",
+            expiresAt: now - 1_000,
+          },
+        },
+        {
+          label: "Account 2",
+          source: "Claude Code-credentials",
+          credentials: {
+            accessToken: "fresh-in-memory",
+            refreshToken: "rt-primary",
+            expiresAt: now + 8 * 60 * 60_000,
+          },
+        },
+      ])
+
+      const readsBefore = keychainModule.__getReadCount()
+      const result = credentialsModule.refreshIfNeeded()
+
+      assert.equal(result?.accessToken, "fresh-in-memory")
+      assert.equal(
+        keychainModule.__getReadCount(),
+        readsBefore,
+        "valid in-memory fallback credentials must not trigger a keychain read",
+      )
+    } finally {
+      Date.now = originalNow
+    }
+  })
+
   it("reloadActiveAccount picks up rotated keychain credentials in place", async () => {
     const now = Date.now()
     const { credentialsModule, keychainModule } =
@@ -791,7 +906,8 @@ describe("syncAuthJson file permissions", () => {
 
       await writeFile(
         tempKeychain,
-        `export function readAllClaudeAccounts() { return [] }
+        `export const PRIMARY_SERVICE = "Claude Code-credentials"
+export function readAllClaudeAccounts() { return [] }
 export function refreshAccount() { return null }
 export function writeBackCredentials() { return true }
 export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account \${i + 1}\`) }`,
@@ -875,7 +991,8 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
 
       await writeFile(
         tempKeychain,
-        `export function readAllClaudeAccounts() { return [] }
+        `export const PRIMARY_SERVICE = "Claude Code-credentials"
+export function readAllClaudeAccounts() { return [] }
 export function refreshAccount() { return null }
 export function writeBackCredentials() { return true }
 export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account \${i + 1}\`) }`,

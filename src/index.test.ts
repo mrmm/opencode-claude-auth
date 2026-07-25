@@ -6,7 +6,6 @@ import {
   readFileSync,
   rmSync,
 } from "node:fs"
-import { spawn } from "node:child_process"
 import { mkdtemp, readFile, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, dirname } from "node:path"
@@ -155,7 +154,7 @@ async function copySourceFiles(
 
 async function loadHelpersWithCountingKeychain(
   initialExpiresAt: number,
-  opts?: { oauthTokenUrl?: string },
+  options: { oauthTokenUrl?: string; throwOnReload?: boolean } = {},
 ): Promise<{
   helpersModule: typeof import("./index.ts")
   keychainModule: {
@@ -166,7 +165,22 @@ async function loadHelpersWithCountingKeychain(
   const tempDir = await mkdtemp(join(tmpdir(), "opencode-claude-auth-cache-"))
   const tempKeychain = join(tempDir, "keychain.ts")
 
-  await copySourceFiles(tempDir, opts)
+  await copySourceFiles(tempDir, options)
+  if (options.throwOnReload) {
+    const tempCredentials = join(tempDir, "credentials.ts")
+    const reloadSignature =
+      "export function reloadCredentialsFromSource(): ClaudeCredentials | null {"
+    const credentialsSource = await readFile(tempCredentials, "utf8")
+    assert.ok(credentialsSource.includes(reloadSignature))
+    await writeFile(
+      tempCredentials,
+      credentialsSource.replace(
+        reloadSignature,
+        `${reloadSignature}\n  throw new Error("forced reload failure")`,
+      ),
+      "utf8",
+    )
+  }
   await writeFile(
     tempKeychain,
     `let readCount = 0
@@ -830,7 +844,7 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
     }
   })
 
-  it("auth fetch retries a 401 with credentials re-read from the source", async () => {
+  it("auth fetch reloads the source and retries once with a rotated token", async () => {
     const originalNow = Date.now
     const originalSetInterval = globalThis.setInterval
     const originalHome = process.env.HOME
@@ -842,22 +856,18 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
       unref() {},
     })) as unknown as typeof setInterval
 
-    let fetchCount = 0
-    const authHeaders: (string | null)[] = []
+    const authorizationHeaders: string[] = []
 
     try {
       const { helpersModule, keychainModule } =
         await loadHelpersWithCountingKeychain(Date.now() + 10 * 60_000)
-      globalThis.fetch = (async (
-        _input: RequestInfo | URL,
-        init?: RequestInit,
-      ) => {
-        fetchCount += 1
-        authHeaders.push(new Headers(init?.headers).get("authorization"))
-        if (fetchCount === 1) {
-          return new Response("unauthorized", { status: 401 })
-        }
-        return new Response("ok", { status: 200 })
+      globalThis.fetch = (async (_input, init) => {
+        authorizationHeaders.push(
+          new Headers(init?.headers).get("authorization") ?? "",
+        )
+        return authorizationHeaders.length === 1
+          ? new Response("revoked", { status: 401 })
+          : new Response("ok", { status: 200 })
       }) as typeof fetch
 
       const plugin = await helpersModule.default({} as never)
@@ -873,13 +883,10 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
         { models: {} },
       )
 
-      // The server starts rejecting the current token even though it still
-      // looks valid locally (e.g. revoked mid-session). An external refresh
-      // has already written a new token to the source.
       keychainModule.__setCredentials({
-        accessToken: "rotated-token",
-        refreshToken: "rotated-refresh",
-        expiresAt: Date.now() + 10 * 60_000,
+        accessToken: "replacement-token",
+        refreshToken: "replacement-refresh",
+        expiresAt: Date.now() + 8 * 60 * 60_000,
       })
 
       const response = await authConfig.fetch(
@@ -890,13 +897,11 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
         },
       )
 
-      assert.equal(fetchCount, 2, "should retry once after the 401")
       assert.equal(response.status, 200)
-      assert.equal(
-        authHeaders[1],
-        "Bearer rotated-token",
-        "retry must use credentials re-read from the source, not the cached rejected token",
-      )
+      assert.deepEqual(authorizationHeaders, [
+        "Bearer token",
+        "Bearer replacement-token",
+      ])
     } finally {
       Date.now = originalNow
       globalThis.setInterval = originalSetInterval
@@ -909,7 +914,7 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
     }
   })
 
-  it("auth fetch falls back to OAuth refresh on 401 when the source still has the rejected token", async () => {
+  it("auth fetch does not retry a 401 when the source token is unchanged", async () => {
     const originalNow = Date.now
     const originalSetInterval = globalThis.setInterval
     const originalHome = process.env.HOME
@@ -921,69 +926,19 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
       unref() {},
     })) as unknown as typeof setInterval
 
-    // Local OAuth token endpoint: the real refreshViaOAuth subprocess posts
-    // here instead of claude.ai (URL rewritten in the copied source). The
-    // server must live in a separate process because refreshViaOAuth uses
-    // execFileSync, which blocks this process's event loop — an in-process
-    // server could never respond.
-    const serverScript = `
-      const s = require("node:http").createServer((q, r) => {
-        r.setHeader("content-type", "application/json")
-        r.end(JSON.stringify({
-          access_token: "oauth-refreshed-token",
-          refresh_token: "oauth-refreshed-refresh",
-          expires_in: 36000,
-        }))
-      })
-      s.listen(0, "127.0.0.1", () => console.log(s.address().port))
-    `
-    let oauthServer: ReturnType<typeof spawn> | undefined
-
-    let fetchCount = 0
-    const authHeaders: (string | null)[] = []
+    let requestCount = 0
+    const errorBody = '{"name":"mcp_UnchangedToken"}'
 
     try {
-      oauthServer = spawn(process.execPath, ["-e", serverScript], {
-        stdio: ["ignore", "pipe", "ignore"],
-      })
-      const server = oauthServer
-      const port = await new Promise<string>((resolve, reject) => {
-        const timer = setTimeout(
-          () => reject(new Error("OAuth stub server did not start within 2s")),
-          2_000,
-        )
-        server.stdout!.once("data", (d) => {
-          clearTimeout(timer)
-          resolve(String(d).trim())
-        })
-        server.once("error", (err) => {
-          clearTimeout(timer)
-          reject(err)
-        })
-        server.once("exit", (code) => {
-          clearTimeout(timer)
-          reject(new Error(`OAuth stub server exited early (code ${code})`))
-        })
-      })
-      assert.match(port, /^\d+$/, "expected a numeric port from the stub")
-      const oauthTokenUrl = `http://127.0.0.1:${port}/v1/oauth/token`
-
       const { helpersModule } = await loadHelpersWithCountingKeychain(
         Date.now() + 10 * 60_000,
-        { oauthTokenUrl },
       )
-      // Keychain keeps returning the same (server-rejected) token: no
-      // external refresh has happened, so only OAuth can self-heal.
-      globalThis.fetch = (async (
-        _input: RequestInfo | URL,
-        init?: RequestInit,
-      ) => {
-        fetchCount += 1
-        authHeaders.push(new Headers(init?.headers).get("authorization"))
-        if (fetchCount === 1) {
-          return new Response("unauthorized", { status: 401 })
-        }
-        return new Response("ok", { status: 200 })
+      globalThis.fetch = (async () => {
+        requestCount += 1
+        return new Response(errorBody, {
+          status: 401,
+          headers: { "x-request-id": "unchanged-token-401" },
+        })
       }) as typeof fetch
 
       const plugin = await helpersModule.default({} as never)
@@ -1007,18 +962,85 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
         },
       )
 
-      assert.equal(fetchCount, 2, "should retry once after the OAuth refresh")
-      assert.equal(response.status, 200)
-      assert.equal(
-        authHeaders[1],
-        "Bearer oauth-refreshed-token",
-        "retry must use the OAuth-refreshed token when the source is stale",
-      )
+      assert.equal(response.status, 401)
+      assert.equal(response.headers.get("x-request-id"), "unchanged-token-401")
+      assert.equal(await response.text(), errorBody)
+      assert.equal(requestCount, 1)
     } finally {
       Date.now = originalNow
       globalThis.setInterval = originalSetInterval
       globalThis.fetch = originalFetch
-      oauthServer?.kill()
+      if (typeof originalHome === "string") {
+        process.env.HOME = originalHome
+      } else {
+        delete process.env.HOME
+      }
+    }
+  })
+
+  it("auth fetch preserves the original 401 when credential reload throws", async () => {
+    const originalNow = Date.now
+    const originalSetInterval = globalThis.setInterval
+    const originalHome = process.env.HOME
+    const originalFetch = globalThis.fetch
+    const tempHome = await mkdtemp(join(tmpdir(), "opencode-claude-auth-home-"))
+    process.env.HOME = tempHome
+    Date.now = () => 1_700_000_000_000
+    globalThis.setInterval = (() => ({
+      unref() {},
+    })) as unknown as typeof setInterval
+
+    let requestCount = 0
+    const errorBody = '{"name":"mcp_ReloadFailure"}'
+
+    try {
+      const { helpersModule } = await loadHelpersWithCountingKeychain(
+        Date.now() + 10 * 60_000,
+        { throwOnReload: true },
+      )
+      globalThis.fetch = (async () => {
+        requestCount += 1
+        return new Response(errorBody, {
+          status: 401,
+          statusText: "Unauthorized",
+          headers: {
+            "content-type": "text/plain",
+            "x-request-id": "request-401",
+          },
+        })
+      }) as typeof fetch
+
+      const plugin = await helpersModule.default({} as never)
+      const typedPlugin = plugin as { auth?: { loader?: TestAuthLoader } }
+      assert.equal(typeof typedPlugin.auth?.loader, "function")
+      const authConfig = await typedPlugin.auth!.loader!(
+        async () => ({
+          type: "oauth",
+          refresh: "refresh",
+          access: "access",
+          expires: Date.now() + 60_000,
+        }),
+        { models: {} },
+      )
+
+      const response = await authConfig.fetch(
+        "https://api.anthropic.com/v1/messages",
+        {
+          method: "POST",
+          body: JSON.stringify({ model: "claude-haiku-4-5", messages: [] }),
+        },
+      )
+
+      assert.equal(response.status, 401)
+      assert.equal(response.statusText, "Unauthorized")
+      assert.equal(response.headers.get("content-type"), "text/plain")
+      assert.equal(response.headers.get("x-request-id"), "request-401")
+      assert.equal(await response.text(), errorBody)
+      assert.equal(requestCount, 1)
+    } finally {
+      Date.now = originalNow
+      globalThis.setInterval = originalSetInterval
+      globalThis.fetch = originalFetch
       if (typeof originalHome === "string") {
         process.env.HOME = originalHome
       } else {

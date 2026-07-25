@@ -24,6 +24,7 @@ async function loadCredentialsWithCountingKeychain(
 ): Promise<{
   credentialsModule: {
     getCachedCredentials: () => Creds | null
+    reloadCredentialsFromSource: () => Creds | null
     getCredentialsForSync: () => Creds | null
     refreshIfNeeded: (account?: {
       label: string
@@ -41,8 +42,10 @@ async function loadCredentialsWithCountingKeychain(
   keychainModule: {
     __getReadCount: () => number
     __getWriteCount: () => number
-    __setCredentials: (c: Creds) => void
+    __setCredentials: (c: Creds | null) => void
     __setAccounts: (list: unknown[]) => void
+    __setReadError: (enabled: boolean) => void
+    __setReadHook: (hook: (() => void) | null) => void
   }
 }> {
   const tempDir = await mkdtemp(join(tmpdir(), "opencode-claude-auth-creds-"))
@@ -70,6 +73,8 @@ async function loadCredentialsWithCountingKeychain(
     `let readCount = 0
 let writeCount = 0
 let accounts = null // null = derive a single account from the credentials var
+let readError = false
+let readHook = null
 let credentials = {
   accessToken: "token",
   refreshToken: "refresh",
@@ -84,7 +89,17 @@ export function readAllClaudeAccounts() {
 
 export function refreshAccount(source) {
   readCount += 1
+  if (readError) throw new Error("Keychain read denied")
+  if (readHook) readHook()
   return credentials
+}
+
+export function __setReadError(enabled) {
+  readError = enabled
+}
+
+export function __setReadHook(hook) {
+  readHook = hook
 }
 
 export function writeBackCredentials() {
@@ -126,6 +141,7 @@ export function __setAccounts(list) {
   return {
     credentialsModule: credentialsModule as {
       getCachedCredentials: () => Creds | null
+      reloadCredentialsFromSource: () => Creds | null
       getCredentialsForSync: () => Creds | null
       refreshIfNeeded: (account?: {
         label: string
@@ -143,13 +159,182 @@ export function __setAccounts(list) {
     keychainModule: keychainModule as {
       __getReadCount: () => number
       __getWriteCount: () => number
-      __setCredentials: (c: Creds) => void
+      __setCredentials: (c: Creds | null) => void
       __setAccounts: (list: unknown[]) => void
+      __setReadError: (enabled: boolean) => void
+      __setReadHook: (hook: (() => void) | null) => void
     },
   }
 }
 
 describe("credential caching", () => {
+  it("reloadCredentialsFromSource bypasses cache and stores rotated Keychain credentials", async () => {
+    const originalNow = Date.now
+    const now = 1_700_000_000_000
+    Date.now = () => now
+
+    try {
+      const { credentialsModule, keychainModule } =
+        await loadCredentialsWithCountingKeychain(now + 10 * 60_000)
+
+      credentialsModule.initAccounts([
+        {
+          label: "Account 1",
+          source: "keychain",
+          credentials: {
+            accessToken: "old-token",
+            refreshToken: "old-refresh",
+            expiresAt: now + 10 * 60_000,
+          },
+        },
+      ])
+
+      assert.equal(
+        credentialsModule.getCachedCredentials()?.accessToken,
+        "old-token",
+      )
+
+      keychainModule.__setCredentials({
+        accessToken: "new-token",
+        refreshToken: "new-refresh",
+        expiresAt: now + 8 * 60 * 60_000,
+      })
+
+      const reloaded = credentialsModule.reloadCredentialsFromSource()
+      const readCountAfterReload = keychainModule.__getReadCount()
+
+      assert.equal(reloaded?.accessToken, "new-token")
+      assert.equal(readCountAfterReload, 1)
+      assert.equal(
+        credentialsModule.getCachedCredentials()?.accessToken,
+        "new-token",
+      )
+      assert.equal(keychainModule.__getReadCount(), readCountAfterReload)
+    } finally {
+      Date.now = originalNow
+    }
+  })
+
+  it("reloadCredentialsFromSource returns null when the source read throws", async () => {
+    const originalNow = Date.now
+    const now = 1_700_000_000_000
+    Date.now = () => now
+
+    try {
+      const { credentialsModule, keychainModule } =
+        await loadCredentialsWithCountingKeychain(now + 10 * 60_000)
+
+      credentialsModule.initAccounts([
+        {
+          label: "Account 1",
+          source: "keychain",
+          credentials: {
+            accessToken: "old-token",
+            refreshToken: "old-refresh",
+            expiresAt: now + 10 * 60_000,
+          },
+        },
+      ])
+      credentialsModule.getCachedCredentials()
+      keychainModule.__setReadError(true)
+
+      assert.equal(credentialsModule.reloadCredentialsFromSource(), null)
+      assert.equal(keychainModule.__getReadCount(), 1)
+    } finally {
+      Date.now = originalNow
+    }
+  })
+
+  it("reloadCredentialsFromSource rejects credentials that enter the expiry buffer during source read", async () => {
+    const originalNow = Date.now
+    let now = 1_700_000_000_000
+    Date.now = () => now
+
+    try {
+      const { credentialsModule, keychainModule } =
+        await loadCredentialsWithCountingKeychain(now + 61_000)
+
+      credentialsModule.initAccounts([
+        {
+          label: "Account 1",
+          source: "keychain",
+          credentials: {
+            accessToken: "old-token",
+            refreshToken: "old-refresh",
+            expiresAt: now + 10 * 60_000,
+          },
+        },
+      ])
+      keychainModule.__setReadHook(() => {
+        now += 2_000
+      })
+
+      assert.equal(credentialsModule.reloadCredentialsFromSource(), null)
+    } finally {
+      Date.now = originalNow
+    }
+  })
+
+  it("reloadCredentialsFromSource returns null when the source is unavailable", async () => {
+    const originalNow = Date.now
+    const now = 1_700_000_000_000
+    Date.now = () => now
+
+    try {
+      const { credentialsModule, keychainModule } =
+        await loadCredentialsWithCountingKeychain(now + 10 * 60_000)
+
+      credentialsModule.initAccounts([
+        {
+          label: "Account 1",
+          source: "keychain",
+          credentials: {
+            accessToken: "old-token",
+            refreshToken: "old-refresh",
+            expiresAt: now + 10 * 60_000,
+          },
+        },
+      ])
+      keychainModule.__setCredentials(null)
+
+      assert.equal(credentialsModule.reloadCredentialsFromSource(), null)
+    } finally {
+      Date.now = originalNow
+    }
+  })
+
+  it("reloadCredentialsFromSource rejects a blank access token", async () => {
+    const originalNow = Date.now
+    const now = 1_700_000_000_000
+    Date.now = () => now
+
+    try {
+      const { credentialsModule, keychainModule } =
+        await loadCredentialsWithCountingKeychain(now + 10 * 60_000)
+
+      credentialsModule.initAccounts([
+        {
+          label: "Account 1",
+          source: "keychain",
+          credentials: {
+            accessToken: "old-token",
+            refreshToken: "old-refresh",
+            expiresAt: now + 10 * 60_000,
+          },
+        },
+      ])
+      keychainModule.__setCredentials({
+        accessToken: "   ",
+        refreshToken: "new-refresh",
+        expiresAt: now + 8 * 60 * 60_000,
+      })
+
+      assert.equal(credentialsModule.reloadCredentialsFromSource(), null)
+    } finally {
+      Date.now = originalNow
+    }
+  })
+
   it("getCachedCredentials reuses cached credentials within 30 second TTL", async () => {
     const originalNow = Date.now
     const now = 1_700_000_000_000

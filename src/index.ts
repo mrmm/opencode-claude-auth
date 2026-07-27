@@ -5,6 +5,14 @@ import { readAllClaudeAccounts, type ClaudeAccount } from "./keychain.ts"
 import { initLogger, log } from "./logger.ts"
 import { applyAccountLabelToConfig } from "./display.ts"
 import {
+  formatQuotaPrefix,
+  parseQuotaHeaders,
+  quotaForAccount,
+  readQuotaCache,
+  refreshQuotas,
+  writeQuotaForAccount,
+} from "./quota.ts"
+import {
   addExcludedBeta,
   getExcludedBetas,
   getModelBetas,
@@ -18,6 +26,7 @@ import {
   getAccountLabelPlacement,
 } from "./plugin-config.ts"
 import {
+  getActiveAccountSource,
   getCachedCredentials,
   getCredentialsForSync,
   syncAuthJson,
@@ -251,6 +260,27 @@ const plugin: Plugin = async () => {
   const defaultAccountSource = accounts[0]?.source ?? null
 
   /**
+   * Prefix a switcher row with that account's quota, e.g.
+   * "[100% 1h19m] Claude Team - Team A".
+   *
+   * Quota is only known for accounts that have served a request on this machine,
+   * since it is read from response headers. Unknown accounts are returned
+   * unchanged rather than padded with a placeholder.
+   */
+  function prefixWithQuota(
+    label: string,
+    source: string,
+    cache: ReturnType<typeof readQuotaCache>,
+  ): string {
+    try {
+      const prefix = formatQuotaPrefix(quotaForAccount(source, cache))
+      return prefix ? `${prefix} ${label}` : label
+    } catch {
+      return label
+    }
+  }
+
+  /**
    * Label of the account currently serving requests, or "" if unknown.
    *
    * Reads the account list fresh: the user can switch accounts, or edit the
@@ -291,6 +321,23 @@ const plugin: Plugin = async () => {
       console.warn(
         "opencode-claude-auth: Claude credentials are expired and could not be refreshed. Run `claude` to re-authenticate.",
       )
+    }
+
+    // Give every switcher row a figure. Passive capture only ever learns about
+    // the account already serving traffic, which is the one the user knows.
+    // Detached: start-up must not wait on the network. Opt out with
+    // CLAUDE_AUTH_QUOTA_PROBE=0.
+    if (process.env.CLAUDE_AUTH_QUOTA_PROBE !== "0") {
+      const probeTargets = accounts
+        .map((a) => ({
+          source: a.source,
+          accessToken: a.credentials?.accessToken ?? "",
+        }))
+        .filter((a) => a.accessToken)
+
+      void refreshQuotas(probeTargets)
+        .then((r) => log("quota_probe", r))
+        .catch(() => {})
     }
 
     // Keep auth.json synced with current credentials (no refresh triggered)
@@ -533,6 +580,25 @@ const plugin: Plugin = async () => {
                 .catch(() => {})
             }
 
+            // Every Anthropic response reports this account's utilisation and
+            // reset time. Recording it here is free, and the account switcher
+            // builds its rows synchronously so it cannot fetch them itself.
+            try {
+              const quota = parseQuotaHeaders(response.headers)
+              const source = getActiveAccountSource()
+              if (quota && source) {
+                writeQuotaForAccount(source, quota)
+                log("quota_observed", {
+                  source,
+                  fiveHour: quota.fiveHour?.utilization,
+                  sevenDay: quota.sevenDay?.utilization,
+                  status: quota.fiveHour?.status,
+                })
+              }
+            } catch {
+              // Never let bookkeeping break a response.
+            }
+
             return transformResponseStream(response)
           },
         }
@@ -547,13 +613,15 @@ const plugin: Plugin = async () => {
             const currentSource =
               loadPersistedAccountSource() ?? defaultAccountSource
             if (currentAccounts.length <= 1) return []
+            // Read once per open, not once per row.
+            const quotaCache = readQuotaCache()
             return [
               {
                 type: "select" as const,
                 key: "account",
                 message: "Select which Claude Code account to use:",
                 options: currentAccounts.map((a) => ({
-                  label: a.label,
+                  label: prefixWithQuota(a.label, a.source, quotaCache),
                   value: a.source,
                   hint:
                     a.source === currentSource

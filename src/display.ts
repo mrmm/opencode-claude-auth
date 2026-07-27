@@ -17,20 +17,12 @@ export type AccountLabelPlacement = "provider" | "model" | "both" | "off"
 
 export const DEFAULT_PLACEMENT: AccountLabelPlacement = "both"
 
-const PLACEMENTS: readonly AccountLabelPlacement[] = [
-  "provider",
-  "model",
-  "both",
-  "off",
-]
+const PLACEMENTS = new Set<string>(["provider", "model", "both", "off"])
 
 export function isAccountLabelPlacement(
   value: unknown,
 ): value is AccountLabelPlacement {
-  return (
-    typeof value === "string" &&
-    PLACEMENTS.includes(value as AccountLabelPlacement)
-  )
+  return typeof value === "string" && PLACEMENTS.has(value)
 }
 
 /**

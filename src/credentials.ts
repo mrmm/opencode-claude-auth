@@ -38,6 +38,10 @@ export function getAccounts(): ClaudeAccount[] {
   return allAccounts
 }
 
+export function getActiveAccountSource(): string | null {
+  return activeAccountSource
+}
+
 export function setActiveAccountSource(source: string): void {
   const previous = activeAccountSource
   activeAccountSource = source

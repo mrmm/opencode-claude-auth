@@ -7,6 +7,20 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
 
+/**
+ * credentials.ts imports config-dir.ts. Each temp directory that hosts a copy of
+ * credentials.ts therefore needs it too, or the import fails with a bare
+ * ERR_MODULE_NOT_FOUND naming only the temp path. It is pure, so the real module
+ * is copied rather than stubbed.
+ */
+async function copyConfigDirModule(tempDir: string): Promise<void> {
+  const src = await readFile(
+    new URL("./config-dir.ts", import.meta.url),
+    "utf8",
+  )
+  await writeFile(join(tempDir, "config-dir.ts"), src, "utf8")
+}
+
 type Creds = {
   accessToken: string
   refreshToken: string
@@ -98,6 +112,7 @@ export function __setCredentials(c) {
     "utf8",
   )
   await writeFile(tempCredentials, rewritten, "utf8")
+  await copyConfigDirModule(tempDir)
 
   const [credentialsModule, keychainModule] = await Promise.all([
     import(pathToFileURL(tempCredentials).href),
@@ -415,6 +430,7 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
         "utf8",
       )
       await writeFile(tempCredentials, rewritten, "utf8")
+      await copyConfigDirModule(tempDir)
 
       const mod = await import(pathToFileURL(tempCredentials).href)
       mod.syncAuthJson({
@@ -499,6 +515,7 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
         "utf8",
       )
       await writeFile(tempCredentials, rewritten, "utf8")
+      await copyConfigDirModule(tempDir)
 
       const mod = await import(pathToFileURL(tempCredentials).href)
       mod.syncAuthJson({

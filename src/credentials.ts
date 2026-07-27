@@ -16,6 +16,7 @@ import {
   type ClaudeAccount,
 } from "./keychain.ts"
 import { resetExcludedBetas } from "./betas.ts"
+import { configDirForService } from "./config-dir.ts"
 import { log } from "./logger.ts"
 
 export type { ClaudeCredentials } from "./keychain.ts"
@@ -246,19 +247,49 @@ export function refreshViaOAuth(
   }
 }
 
-function refreshViaCli(): void {
+function refreshViaCli(service?: string): void {
+  // `claude` refreshes whichever account its config directory points at. With
+  // several accounts configured, a bare invocation refreshes the default one and
+  // still exits 0, so the target stays expired while the refresh looks like it
+  // worked. Point CLAUDE_CONFIG_DIR at the directory that owns this Keychain
+  // entry instead.
+  let configDir: string | null = null
+  if (service) {
+    configDir = configDirForService(service)
+    if (!configDir) {
+      // Refreshing the wrong account costs tokens and fixes nothing.
+      log("refresh_skipped", {
+        source: "cli",
+        service,
+        reason: "no config directory maps to this credential entry",
+      })
+      return
+    }
+  }
+
   const maxAttempts = 2
   for (let i = 0; i < maxAttempts; i++) {
-    log("refresh_started", { source: "cli", attempt: i + 1 })
+    log("refresh_started", {
+      source: "cli",
+      attempt: i + 1,
+      configDir: configDir ?? "(default)",
+    })
     try {
       execSync("claude -p . --model haiku", {
         timeout: 60_000,
         encoding: "utf-8",
-        env: { ...process.env, TERM: "dumb" },
+        env: {
+          ...process.env,
+          TERM: "dumb",
+          ...(configDir ? { CLAUDE_CONFIG_DIR: configDir } : {}),
+        },
         stdio: "ignore",
         cwd: tmpdir(),
       })
-      log("refresh_success", { source: "cli" })
+      log("refresh_success", {
+        source: "cli",
+        configDir: configDir ?? "(default)",
+      })
       return
     } catch (err) {
       log("refresh_failed", {
@@ -297,6 +328,12 @@ export function refreshIfNeeded(
   })
 
   // Try direct OAuth refresh first (zero LLM tokens consumed)
+  if (!creds.refreshToken) {
+    log("refresh_no_token", {
+      source: target.source,
+      reason: "credential entry has no refresh token; OAuth refresh impossible",
+    })
+  }
   if (creds.refreshToken) {
     const oauthCreds = refreshViaOAuth(creds.refreshToken)
     if (oauthCreds && oauthCreds.expiresAt > Date.now() + 60_000) {
@@ -308,7 +345,7 @@ export function refreshIfNeeded(
 
   // Fall back to CLI-based refresh (consumes Haiku tokens)
   log("refresh_fallback_cli", { source: target.source })
-  refreshViaCli()
+  refreshViaCli(target.source)
   const refreshed = refreshAccount(target.source)
   if (refreshed && refreshed.expiresAt > Date.now() + 60_000) {
     target.credentials = refreshed

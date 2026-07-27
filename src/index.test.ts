@@ -3,6 +3,7 @@ import {
   existsSync,
   writeFileSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
 } from "node:fs"
@@ -118,16 +119,16 @@ function buildAuthorizeResult(account: Account) {
   }
 }
 
-const SOURCE_FILES = [
-  "index.ts",
-  "betas.ts",
-  "model-config.ts",
-  "plugin-config.ts",
-  "signing.ts",
-  "transforms.ts",
-  "credentials.ts",
-  "logger.ts",
-] as const
+// Derived, not hand-listed. These tests import index.ts from a temp directory,
+// so every module it can reach must be copied there. A hand-maintained list
+// silently rots: adding a module that index.ts imports made 21 tests report as
+// "cancelled" with only an ERR_MODULE_NOT_FOUND for the temp path to go on.
+//
+// keychain.ts is copied too but both callers overwrite it with a stub after
+// this runs, so the stub still wins.
+const SOURCE_FILES = readdirSync(new URL(".", import.meta.url)).filter(
+  (f) => f.endsWith(".ts") && !f.endsWith(".test.ts"),
+)
 
 async function copySourceFiles(tempDir: string): Promise<void> {
   await Promise.all(

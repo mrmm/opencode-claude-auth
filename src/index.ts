@@ -3,6 +3,7 @@ import crypto from "node:crypto"
 import { config } from "./model-config.ts"
 import { readAllClaudeAccounts, type ClaudeAccount } from "./keychain.ts"
 import { initLogger, log } from "./logger.ts"
+import { applyAccountLabelToConfig } from "./display.ts"
 import {
   addExcludedBeta,
   getExcludedBetas,
@@ -12,7 +13,10 @@ import {
   LONG_CONTEXT_BETAS,
 } from "./betas.ts"
 import { transformBody, transformResponseStream } from "./transforms.ts"
-import { applyOpencodeConfig } from "./plugin-config.ts"
+import {
+  applyOpencodeConfig,
+  getAccountLabelPlacement,
+} from "./plugin-config.ts"
 import {
   getCachedCredentials,
   getCredentialsForSync,
@@ -45,7 +49,16 @@ export {
   refreshAccountsList,
   type ClaudeCredentials,
 } from "./credentials.ts"
-export { isEnable1mContext, type PluginSettings } from "./plugin-config.ts"
+export {
+  getAccountLabelPlacement,
+  isEnable1mContext,
+  type PluginSettings,
+} from "./plugin-config.ts"
+export {
+  applyAccountLabelToConfig,
+  decorateName,
+  type AccountLabelPlacement,
+} from "./display.ts"
 export {
   buildBillingHeaderValue,
   computeCch,
@@ -237,6 +250,26 @@ const plugin: Plugin = async () => {
 
   const defaultAccountSource = accounts[0]?.source ?? null
 
+  /**
+   * Label of the account currently serving requests, or "" if unknown.
+   *
+   * Reads the account list fresh: the user can switch accounts, or edit the
+   * Keychain comment, without restarting OpenCode.
+   */
+  function activeAccountLabel(): string {
+    try {
+      const current = refreshAccountsList()
+      const source = loadPersistedAccountSource() ?? defaultAccountSource
+      const active = source
+        ? (current.find((a) => a.source === source) ?? current[0])
+        : current[0]
+      return active?.label ?? ""
+    } catch {
+      // A display nicety must never break auth.
+      return ""
+    }
+  }
+
   if (accounts.length > 0) {
     const persistedSource = loadPersistedAccountSource()
     const defaultAccount =
@@ -280,6 +313,30 @@ const plugin: Plugin = async () => {
   return {
     config: async (opencodeConfig) => {
       applyOpencodeConfig(opencodeConfig)
+
+      // Show which account is serving this session. The switcher label is
+      // otherwise visible only while the switcher is open, so with several
+      // accounts configured nothing on screen tells them apart.
+      try {
+        const placement = getAccountLabelPlacement()
+        const label = activeAccountLabel()
+        const applied = applyAccountLabelToConfig(
+          opencodeConfig,
+          label,
+          placement,
+        )
+        log("account_label_config", {
+          label: label || "(none)",
+          placement,
+          provider: applied.provider,
+          models: applied.models,
+        })
+      } catch (err) {
+        // Never let a cosmetic label stop the config from loading.
+        log("account_label_failed", {
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
     },
     "experimental.chat.system.transform": async (input, output) => {
       if (input.model?.providerID !== "anthropic") {

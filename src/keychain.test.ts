@@ -20,6 +20,7 @@ import {
   readCredentialsFile,
   updateCredentialBlob,
   writeBackCredentials,
+  parseKeychainComments,
 } from "./keychain.ts"
 
 // Mirrors listClaudeKeychainServices regex logic for unit testing
@@ -927,5 +928,79 @@ describe("keychainSuffixForDir", () => {
   it("is consistent for the same input", () => {
     const dir = join(homedir(), ".someconfig")
     assert.equal(keychainSuffixForDir(dir), keychainSuffixForDir(dir))
+  })
+})
+
+describe("parseKeychainComments", () => {
+  // Mirrors `security dump-keychain` output, including a non-Claude item and
+  // <NULL> comments that must not become labels.
+  const DUMP = `keychain: "/Users/t/Library/Keychains/login.keychain-db"
+class: "genp"
+attributes:
+    0x00000007 <blob>="Claude Code-credentials"
+    "icmt"<blob>=<NULL>
+    "svce"<blob>="Claude Code-credentials"
+keychain: "/Users/t/Library/Keychains/login.keychain-db"
+class: "genp"
+attributes:
+    0x00000007 <blob>="Claude Code-credentials-780bcd9b"
+    "icmt"<blob>="Team A"
+    "svce"<blob>="Claude Code-credentials-780bcd9b"
+keychain: "/Users/t/Library/Keychains/login.keychain-db"
+class: "genp"
+attributes:
+    0x00000007 <blob>="Example"
+    "icmt"<blob>="unrelated"
+    "svce"<blob>="com.example.Example"
+`
+
+  it("maps a service to its comment", () => {
+    const m = parseKeychainComments(DUMP)
+    assert.equal(
+      m.get("Claude Code-credentials-780bcd9b"),
+      "Team A",
+    )
+  })
+
+  it("omits <NULL> comments instead of labelling with them", () => {
+    assert.equal(
+      parseKeychainComments(DUMP).has("Claude Code-credentials"),
+      false,
+    )
+  })
+
+  it("keeps entries keyed by service, including non-Claude ones", () => {
+    // Filtering by service prefix is the caller's job; parsing stays dumb.
+    assert.equal(
+      parseKeychainComments(DUMP).get("com.example.Example"),
+      "unrelated",
+    )
+  })
+
+  it("returns empty for junk input rather than throwing", () => {
+    for (const bad of ["", "not a dump", undefined as unknown as string]) {
+      assert.equal(parseKeychainComments(bad).size, 0)
+    }
+  })
+})
+
+describe("buildAccountLabels — comment precedence", () => {
+  const creds = (sub: string) =>
+    ({
+      accessToken: "a",
+      refreshToken: "r",
+      expiresAt: 0,
+      subscriptionType: sub,
+    }) as never
+
+  it("falls back to email, then to the raw service", () => {
+    // No comments are registered in this process, so email wins where present.
+    const labels = buildAccountLabels(
+      [creds("team"), creds("team")],
+      ["a@b.c", null],
+      ["svc-1", "svc-2"],
+    )
+    assert.equal(labels[0], "Claude Team 1: a@b.c")
+    assert.equal(labels[1], "Claude Team 2: svc-2")
   })
 })

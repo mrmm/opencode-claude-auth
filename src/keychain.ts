@@ -142,6 +142,31 @@ function readKeychainService(serviceName: string): string | null {
   }
 }
 
+/**
+ * Service -> user-set Keychain comment, from the most recent dump.
+ *
+ * The comment is the only field that distinguishes these accounts here: every
+ * config directory reports the same email, so an email-based label yields
+ * several identical entries. Populated as a side effect of the dump below rather
+ * than by a second one, which reads ~10 MB.
+ */
+const commentsByService = new Map<string, string>()
+
+export function keychainComment(service: string): string | null {
+  return commentsByService.get(service) ?? null
+}
+
+/** Extract svce -> icmt from a `security dump-keychain` payload. */
+export function parseKeychainComments(dump: string): Map<string, string> {
+  const out = new Map<string, string>()
+  for (const block of (dump ?? "").split(/^keychain:/m)) {
+    const svce = /^\s*"svce"<blob>="([^"]*)"/m.exec(block)?.[1]
+    const icmt = /^\s*"icmt"<blob>="([^"]*)"/m.exec(block)?.[1]
+    if (svce && icmt && icmt.trim()) out.set(svce, icmt.trim())
+  }
+  return out
+}
+
 function listClaudeKeychainServices(): string[] {
   try {
     const dump = execSync("security dump-keychain", {
@@ -149,6 +174,11 @@ function listClaudeKeychainServices(): string[] {
       maxBuffer: 1024 * 1024 * 10, // 10 MB
       encoding: "utf-8",
     })
+
+    commentsByService.clear()
+    for (const [svc, comment] of parseKeychainComments(dump)) {
+      commentsByService.set(svc, comment)
+    }
 
     const services: string[] = []
     const seen = new Set<string>()
@@ -300,17 +330,28 @@ export function buildAccountLabels(
 
   const seen = new Map<string, number>()
   return baseLabels.map((base, i) => {
+    // A comment already names the account, so the disambiguating number would
+    // only add noise ("Claude Team - Team 1 - ..."). Reserve numbering for
+    // accounts that have nothing else to tell them apart.
+    const src = sources?.[i]
+    const ownComment = src ? keychainComment(src) : null
+
     let label: string
-    if ((counts.get(base) ?? 0) <= 1) {
+    if ((counts.get(base) ?? 0) <= 1 || ownComment) {
       label = base
     } else {
       const n = (seen.get(base) ?? 0) + 1
       seen.set(base, n)
       label = `${base} ${n}`
     }
+    // Comment first: it is user-set and unique per account. Email is next, but
+    // several accounts can share one, in which case it cannot tell them apart.
+    // The raw service name is a last resort -- it identifies the entry without
+    // describing it.
+    if (ownComment) return `${label} - ${ownComment}`
+    const source = src
     const email = emails?.[i]
     if (email) return `${label}: ${email}`
-    const source = sources?.[i]
     return source ? `${label}: ${source}` : label
   })
 }

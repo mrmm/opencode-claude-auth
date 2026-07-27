@@ -4,6 +4,7 @@ import { config } from "./model-config.ts"
 import { readAllClaudeAccounts, type ClaudeAccount } from "./keychain.ts"
 import { initLogger, log } from "./logger.ts"
 import { applyAccountLabelToConfig } from "./display.ts"
+import { buildAdvisory } from "./advisory.ts"
 import {
   formatQuotaPrefix,
   parseQuotaHeaders,
@@ -239,7 +240,7 @@ export function buildRequestHeaders(
 
 const SYNC_INTERVAL = 5 * 60 * 1000 // 5 minutes
 
-const plugin: Plugin = async () => {
+const plugin: Plugin = async ({ client }) => {
   initLogger()
 
   let accounts: ClaudeAccount[] = []
@@ -336,7 +337,38 @@ const plugin: Plugin = async () => {
         .filter((a) => a.accessToken)
 
       void refreshQuotas(probeTargets)
-        .then((r) => log("quota_probe", r))
+        .then(async (r) => {
+          log("quota_probe", r)
+
+          // OpenCode's status bar cannot be extended -- there is no statusline
+          // plugin hook or endpoint -- so an actionable state is delivered as a
+          // toast. Silent unless something is worth interrupting for.
+          try {
+            const advisory = buildAdvisory(
+              accounts.map((a) => ({ source: a.source, label: a.label })),
+              readQuotaCache(),
+              getActiveAccountSource(),
+            )
+            if (!advisory) return
+            await client.tui.showToast({
+              body: {
+                title: advisory.title,
+                message: advisory.message,
+                variant: advisory.variant,
+                duration: 12_000,
+              },
+            })
+            log("quota_advisory_shown", {
+              variant: advisory.variant,
+              message: advisory.message,
+            })
+          } catch (err) {
+            // A missing TUI (headless/serve) or any client error is not fatal.
+            log("quota_advisory_failed", {
+              error: err instanceof Error ? err.message : String(err),
+            })
+          }
+        })
         .catch(() => {})
     }
 

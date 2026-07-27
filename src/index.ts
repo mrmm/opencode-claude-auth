@@ -688,11 +688,23 @@ const plugin: Plugin = async ({ client }) => {
                 type: "select" as const,
                 key: "account",
                 message: "Select which Claude Code account to use:",
-                options: currentAccounts.map((a) => ({
-                  label: prefixWithQuota(a.label, a.source, quotaCache),
-                  value: a.source,
-                  hint: a.source === currentSource ? "active" : undefined,
-                })),
+                // `hint` must be a string when present. Passing undefined fails
+                // OpenCode's schema validation for the whole request --
+                // /provider/auth answers 500, the TUI falls back to its built-in
+                // "API key" prompt, and every account becomes unreachable. Omit
+                // the key instead of setting it to undefined.
+                options: currentAccounts.map((a) => {
+                  const option: {
+                    label: string
+                    value: string
+                    hint?: string
+                  } = {
+                    label: prefixWithQuota(a.label, a.source, quotaCache),
+                    value: a.source,
+                  }
+                  if (a.source === currentSource) option.hint = "active"
+                  return option
+                }),
               },
             ]
           },

@@ -1,4 +1,12 @@
-import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs"
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs"
 import { dirname, join } from "node:path"
 import { homedir } from "node:os"
 import type { Writable } from "node:stream"
@@ -92,11 +100,88 @@ export function eventEnabled(event: string): boolean {
   return matchers.some((m) => !m.negated && m.re.test(event))
 }
 
+/**
+ * Size-based rotation.
+ *
+ * The log previously truncated on every init, which bounded it but threw away
+ * the previous session -- exactly the run you want when something failed at
+ * start-up and you have just restarted. It now appends across sessions and
+ * rotates on size instead, keeping a few generations.
+ *
+ * Size is tracked in memory, seeded from the file at init, so the hot path does
+ * not stat() once per line.
+ */
+const DEFAULT_MAX_BYTES = 5 * 1024 * 1024
+const DEFAULT_KEEP = 3
+
+/** Accepts a byte count or a suffixed size: 512, 900KB, 5MB, 1.5 MiB. */
+export function parseSize(
+  input: string | undefined,
+  fallback = DEFAULT_MAX_BYTES,
+): number {
+  if (!input) return fallback
+  const m = /^\s*([0-9]*\.?[0-9]+)\s*(b|kb|mb|gb|kib|mib|gib)?\s*$/i.exec(input)
+  if (!m) return fallback
+  const n = Number.parseFloat(m[1])
+  if (!Number.isFinite(n) || n <= 0) return fallback
+  const unit = (m[2] ?? "b").toLowerCase()
+  const mult: Record<string, number> = {
+    b: 1,
+    kb: 1024,
+    kib: 1024,
+    mb: 1024 ** 2,
+    mib: 1024 ** 2,
+    gb: 1024 ** 3,
+    gib: 1024 ** 3,
+  }
+  return Math.floor(n * (mult[unit] ?? 1))
+}
+
+export function parseKeep(
+  input: string | undefined,
+  fallback = DEFAULT_KEEP,
+): number {
+  if (!input) return fallback
+  const n = Number.parseInt(input, 10)
+  if (!Number.isFinite(n) || n < 0) return fallback
+  return Math.min(n, 50)
+}
+
+/**
+ * Shift generations and start a fresh file: log -> log.1, log.1 -> log.2, ...
+ *
+ * `keep` of 0 means no history: the file is simply truncated. Never throws --
+ * losing rotation is preferable to breaking the caller.
+ */
+export function rotateLog(path: string, keep: number): void {
+  try {
+    if (keep <= 0) {
+      writeFileSync(path, "", "utf-8")
+      return
+    }
+    // Drop the oldest, then shift the rest down, highest first so nothing is
+    // overwritten before it has moved.
+    const oldest = `${path}.${keep}`
+    if (existsSync(oldest)) rmSync(oldest, { force: true })
+    for (let i = keep - 1; i >= 1; i--) {
+      const from = `${path}.${i}`
+      if (existsSync(from)) renameSync(from, `${path}.${i + 1}`)
+    }
+    if (existsSync(path)) renameSync(path, `${path}.1`)
+    writeFileSync(path, "", "utf-8")
+  } catch {
+    // Rotation is best-effort.
+  }
+}
+
 type LogMode = "disabled" | "file" | "stream"
 
 let mode: LogMode = "disabled"
 let logFilePath: string | null = null
 let logStream: Writable | null = null
+let maxBytes = DEFAULT_MAX_BYTES
+let keepFiles = DEFAULT_KEEP
+let bytesWritten = 0
 
 function getDefaultLogPath(): string {
   return join(homedir(), ".local", "share", "opencode", "claude-auth-debug.log")
@@ -124,11 +209,28 @@ export function initLogger(options?: { stream?: Writable }): void {
   mode = "file"
   logFilePath = envVal === "1" ? getDefaultLogPath() : envVal
 
+  maxBytes = parseSize(process.env.CLAUDE_AUTH_DEBUG_MAX_SIZE)
+  keepFiles = parseKeep(process.env.CLAUDE_AUTH_DEBUG_KEEP)
+
   const dir = dirname(logFilePath)
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true })
   }
-  writeFileSync(logFilePath, "", "utf-8")
+
+  // Carry the previous session forward unless it is already at the limit.
+  let existing = 0
+  try {
+    existing = existsSync(logFilePath) ? statSync(logFilePath).size : 0
+  } catch {
+    existing = 0
+  }
+  if (existing >= maxBytes) {
+    rotateLog(logFilePath, keepFiles)
+    existing = 0
+  } else if (!existsSync(logFilePath)) {
+    writeFileSync(logFilePath, "", "utf-8")
+  }
+  bytesWritten = existing
 }
 
 export function log(event: string, data?: Record<string, unknown>): void {
@@ -143,7 +245,13 @@ export function log(event: string, data?: Record<string, unknown>): void {
   const line = JSON.stringify(entry) + "\n"
 
   if (mode === "file" && logFilePath) {
+    // Rotate before writing so a single line never straddles generations.
+    if (bytesWritten + line.length > maxBytes) {
+      rotateLog(logFilePath, keepFiles)
+      bytesWritten = 0
+    }
     appendFileSync(logFilePath, line, "utf-8")
+    bytesWritten += Buffer.byteLength(line, "utf-8")
   } else if (mode === "stream" && logStream) {
     logStream.write(line)
   }
@@ -153,6 +261,9 @@ export function closeLogger(): void {
   mode = "disabled"
   matchers = []
   hasInclude = false
+  bytesWritten = 0
+  maxBytes = DEFAULT_MAX_BYTES
+  keepFiles = DEFAULT_KEEP
   logFilePath = null
   logStream = null
 }

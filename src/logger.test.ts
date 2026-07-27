@@ -1,10 +1,25 @@
 import assert from "node:assert/strict"
 import { afterEach, beforeEach, describe, it } from "node:test"
-import { mkdtempSync, readFileSync, existsSync, rmSync } from "node:fs"
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { PassThrough } from "node:stream"
-import { initLogger, log, closeLogger, redact } from "./logger.ts"
+import {
+  closeLogger,
+  initLogger,
+  log,
+  parseKeep,
+  parseSize,
+  redact,
+  rotateLog,
+} from "./logger.ts"
 
 describe("logger", () => {
   let tmpDir: string
@@ -67,22 +82,24 @@ describe("logger", () => {
       assert.equal(JSON.parse(lines[1]).event, "event_two")
     })
 
-    it("truncates the file on initLogger()", () => {
+    it("keeps the previous session's log instead of truncating", () => {
+      // Truncating on every init destroyed the run you most often want: the one
+      // that just failed at start-up, before you restarted. Rotation is now
+      // driven by size, so init appends.
       const logPath = join(tmpDir, "test.log")
       process.env.CLAUDE_AUTH_DEBUG = logPath
 
-      // First session
       initLogger()
       log("old_event", {})
       closeLogger()
 
-      // Second session — should truncate
       initLogger()
       log("new_event", {})
 
       const lines = readFileSync(logPath, "utf-8").trim().split("\n")
-      assert.equal(lines.length, 1)
-      assert.equal(JSON.parse(lines[0]).event, "new_event")
+      assert.equal(lines.length, 2)
+      assert.equal(JSON.parse(lines[0]).event, "old_event")
+      assert.equal(JSON.parse(lines[1]).event, "new_event")
     })
 
     it("creates parent directories if they don't exist", () => {
@@ -331,5 +348,151 @@ describe("event selection (CLAUDE_AUTH_DEBUG_EVENTS)", () => {
   it("does not treat a glob metacharacter as a literal escape hatch", () => {
     // A dot in a pattern must not match any character.
     assert.deepEqual(pass("quota.probe", ALL), [])
+  })
+})
+
+describe("size parsing", () => {
+  it("accepts plain byte counts", () => {
+    assert.equal(parseSize("512"), 512)
+  })
+
+  it("accepts suffixed sizes", () => {
+    assert.equal(parseSize("1KB"), 1024)
+    assert.equal(parseSize("2mb"), 2 * 1024 * 1024)
+    assert.equal(parseSize("1 MiB"), 1024 * 1024)
+    assert.equal(parseSize("1.5KB"), 1536)
+  })
+
+  it("falls back on junk rather than logging to a zero-size file", () => {
+    // A zero or negative cap would rotate on every single line.
+    for (const bad of ["", "abc", "0", "-5", "5 parsecs", undefined]) {
+      assert.equal(parseSize(bad, 999), 999)
+    }
+  })
+
+  it("defaults to 5 MB", () => {
+    assert.equal(parseSize(undefined), 5 * 1024 * 1024)
+  })
+})
+
+describe("keep parsing", () => {
+  it("reads a count", () => {
+    assert.equal(parseKeep("5"), 5)
+  })
+
+  it("allows zero, meaning no history", () => {
+    assert.equal(parseKeep("0"), 0)
+  })
+
+  it("rejects junk and negatives", () => {
+    for (const bad of ["", "abc", "-1", undefined]) {
+      assert.equal(parseKeep(bad, 3), 3)
+    }
+  })
+
+  it("caps the number of generations", () => {
+    assert.equal(parseKeep("9999"), 50)
+  })
+})
+
+const rotDir = mkdtempSync(join(tmpdir(), "logrot-"))
+
+describe("rotateLog", () => {
+  it("shifts generations and starts empty", () => {
+    const p = join(rotDir, "rot.log")
+    writeFileSync(p, "current\n")
+    writeFileSync(`${p}.1`, "older\n")
+
+    rotateLog(p, 3)
+
+    assert.equal(readFileSync(p, "utf-8"), "")
+    assert.equal(readFileSync(`${p}.1`, "utf-8"), "current\n")
+    assert.equal(readFileSync(`${p}.2`, "utf-8"), "older\n")
+  })
+
+  it("discards the oldest beyond keep", () => {
+    const p = join(rotDir, "rot2.log")
+    writeFileSync(p, "c\n")
+    writeFileSync(`${p}.1`, "b\n")
+    writeFileSync(`${p}.2`, "a\n")
+
+    rotateLog(p, 2)
+
+    assert.equal(readFileSync(`${p}.1`, "utf-8"), "c\n")
+    assert.equal(readFileSync(`${p}.2`, "utf-8"), "b\n")
+    assert.equal(existsSync(`${p}.3`), false)
+  })
+
+  it("keep=0 truncates without keeping history", () => {
+    const p = join(rotDir, "rot3.log")
+    writeFileSync(p, "gone\n")
+    rotateLog(p, 0)
+    assert.equal(readFileSync(p, "utf-8"), "")
+    assert.equal(existsSync(`${p}.1`), false)
+  })
+
+  it("does not throw on an unwritable path", () => {
+    assert.doesNotThrow(() => rotateLog("/proc/nope/x.log", 3))
+  })
+})
+
+describe("rotation while logging", () => {
+  let savedMax: string | undefined
+  let savedKeep: string | undefined
+
+  beforeEach(() => {
+    savedMax = process.env.CLAUDE_AUTH_DEBUG_MAX_SIZE
+    savedKeep = process.env.CLAUDE_AUTH_DEBUG_KEEP
+  })
+  afterEach(() => {
+    if (savedMax === undefined) delete process.env.CLAUDE_AUTH_DEBUG_MAX_SIZE
+    else process.env.CLAUDE_AUTH_DEBUG_MAX_SIZE = savedMax
+    if (savedKeep === undefined) delete process.env.CLAUDE_AUTH_DEBUG_KEEP
+    else process.env.CLAUDE_AUTH_DEBUG_KEEP = savedKeep
+    closeLogger()
+  })
+
+  it("rotates once the file passes the limit", () => {
+    const p = join(rotDir, "grow.log")
+    process.env.CLAUDE_AUTH_DEBUG = p
+    process.env.CLAUDE_AUTH_DEBUG_MAX_SIZE = "400"
+    process.env.CLAUDE_AUTH_DEBUG_KEEP = "2"
+
+    initLogger()
+    for (let i = 0; i < 40; i++) log("stream_event", { i, pad: "x".repeat(40) })
+    closeLogger()
+
+    // The live file is bounded, and history exists.
+    assert.ok(statSync(p).size <= 400 + 200, `live file ${statSync(p).size}B`)
+    assert.equal(existsSync(`${p}.1`), true)
+  })
+
+  it("never keeps more generations than requested", () => {
+    const p = join(rotDir, "grow2.log")
+    process.env.CLAUDE_AUTH_DEBUG = p
+    process.env.CLAUDE_AUTH_DEBUG_MAX_SIZE = "200"
+    process.env.CLAUDE_AUTH_DEBUG_KEEP = "2"
+
+    initLogger()
+    for (let i = 0; i < 80; i++) log("stream_event", { i, pad: "y".repeat(40) })
+    closeLogger()
+
+    assert.equal(existsSync(`${p}.1`), true)
+    assert.equal(existsSync(`${p}.2`), true)
+    assert.equal(existsSync(`${p}.3`), false)
+  })
+
+  it("rotates at init when the existing file is already over the limit", () => {
+    const p = join(rotDir, "big.log")
+    writeFileSync(p, "z".repeat(1000))
+    process.env.CLAUDE_AUTH_DEBUG = p
+    process.env.CLAUDE_AUTH_DEBUG_MAX_SIZE = "500"
+    process.env.CLAUDE_AUTH_DEBUG_KEEP = "1"
+
+    initLogger()
+    log("new_event", {})
+
+    assert.equal(readFileSync(`${p}.1`, "utf-8").length, 1000)
+    assert.equal(readFileSync(p, "utf-8").trim().split("\n").length, 1)
   })
 })

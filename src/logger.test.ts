@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { describe, it, beforeEach, afterEach } from "node:test"
+import { afterEach, beforeEach, describe, it } from "node:test"
 import { mkdtempSync, readFileSync, existsSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
@@ -216,5 +216,120 @@ describe("redact", () => {
     assert.equal(result.count, 42)
     assert.equal(result.success, true)
     assert.deepEqual(result.items, ["a", "b"])
+  })
+})
+
+describe("event selection (CLAUDE_AUTH_DEBUG_EVENTS)", () => {
+  let saved: string | undefined
+
+  beforeEach(() => {
+    saved = process.env.CLAUDE_AUTH_DEBUG_EVENTS
+  })
+  afterEach(() => {
+    if (saved === undefined) delete process.env.CLAUDE_AUTH_DEBUG_EVENTS
+    else process.env.CLAUDE_AUTH_DEBUG_EVENTS = saved
+    closeLogger()
+  })
+
+  /** Apply a spec and return which of `events` would be written. */
+  function pass(spec: string | undefined, events: string[]): string[] {
+    if (spec === undefined) delete process.env.CLAUDE_AUTH_DEBUG_EVENTS
+    else process.env.CLAUDE_AUTH_DEBUG_EVENTS = spec
+    const lines: string[] = []
+    initLogger({
+      stream: { write: (c: string) => lines.push(String(c)) } as never,
+    })
+    for (const e of events) log(e)
+    closeLogger()
+    return lines.map((l) => JSON.parse(l).event)
+  }
+
+  const ALL = [
+    "plugin_init",
+    "keychain_read",
+    "refresh_started",
+    "refresh_failed",
+    "proactive_refresh_check",
+    "quota_probe",
+    "quota_advisory_shown",
+    "fetch_error_response",
+  ]
+
+  it("logs everything when unset — existing setups are unaffected", () => {
+    assert.deepEqual(pass(undefined, ALL), ALL)
+    assert.deepEqual(pass("", ALL), ALL)
+  })
+
+  it("a bare group name selects the whole group", () => {
+    assert.deepEqual(pass("quota", ALL), [
+      "quota_probe",
+      "quota_advisory_shown",
+    ])
+  })
+
+  it("accepts several groups", () => {
+    assert.deepEqual(pass("quota,plugin", ALL), [
+      "plugin_init",
+      "quota_probe",
+      "quota_advisory_shown",
+    ])
+  })
+
+  it("matches globs against the whole event name", () => {
+    assert.deepEqual(pass("*_failed", ALL), ["refresh_failed"])
+  })
+
+  it("excludes with a leading dash, keeping everything else", () => {
+    const got = pass("-keychain_read", ALL)
+    assert.ok(!got.includes("keychain_read"))
+    assert.equal(got.length, ALL.length - 1)
+  })
+
+  it("lets exclusions override inclusions", () => {
+    // refresh_started is in the group but explicitly removed.
+    assert.deepEqual(pass("refresh,-refresh_started", ALL), [
+      "refresh_failed",
+      // proactive_refresh_* does not start with "refresh"
+    ])
+  })
+
+  it("does not let a group name match mid-string", () => {
+    // "refresh" must not pull in proactive_refresh_check.
+    assert.ok(!pass("refresh", ALL).includes("proactive_refresh_check"))
+    assert.ok(
+      pass("proactive_refresh", ALL).includes("proactive_refresh_check"),
+    )
+  })
+
+  it("supports the errors alias", () => {
+    assert.deepEqual(pass("errors", ALL), [
+      "refresh_failed",
+      "fetch_error_response",
+    ])
+  })
+
+  it("treats all and * as everything", () => {
+    assert.deepEqual(pass("all", ALL), ALL)
+    assert.deepEqual(pass("*", ALL), ALL)
+  })
+
+  it("ignores blanks and stray separators", () => {
+    assert.deepEqual(pass(" , quota , ", ALL), [
+      "quota_probe",
+      "quota_advisory_shown",
+    ])
+  })
+
+  it("accepts ! as an exclusion prefix too", () => {
+    assert.ok(!pass("!quota", ALL).includes("quota_probe"))
+  })
+
+  it("selects nothing when no pattern matches, rather than falling back to all", () => {
+    assert.deepEqual(pass("nonexistent_group", ALL), [])
+  })
+
+  it("does not treat a glob metacharacter as a literal escape hatch", () => {
+    // A dot in a pattern must not match any character.
+    assert.deepEqual(pass("quota.probe", ALL), [])
   })
 })

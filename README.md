@@ -130,6 +130,31 @@ Disable when done:
 unset CLAUDE_AUTH_DEBUG
 ```
 
+### Choosing what to log
+
+A start-up logs around thirty lines across a dozen event types, most of which are
+irrelevant to any given question — a single keychain read alone fires eight times.
+`CLAUDE_AUTH_DEBUG_EVENTS` narrows it to a comma-separated list of patterns:
+
+```bash
+export CLAUDE_AUTH_DEBUG_EVENTS=quota              # one group
+export CLAUDE_AUTH_DEBUG_EVENTS=refresh,quota      # several
+export CLAUDE_AUTH_DEBUG_EVENTS='*_failed'         # glob on the whole name
+export CLAUDE_AUTH_DEBUG_EVENTS=errors             # alias: failure-shaped events
+export CLAUDE_AUTH_DEBUG_EVENTS=-keychain,-cache   # everything except these
+export CLAUDE_AUTH_DEBUG_EVENTS=refresh,-refresh_started
+```
+
+A bare name matches its whole group, so `refresh` covers `refresh_started`,
+`refresh_success` and so on — but not `proactive_refresh_check`, which is its own
+group. Exclusions (`-` or `!`) always win. Leaving the variable unset logs
+everything, so existing setups are unchanged.
+
+Groups: `account`, `auth`, `cache`, `credentials`, `fetch`, `keychain`, `plugin`,
+`proactive_refresh`, `quota`, `refresh`, `sync`, `writeback`.
+
+Logs are written to a file, never to the terminal, so they cannot corrupt the TUI.
+
 ## Long context (1M)
 
 1M token context is supported natively — the API no longer requires a beta flag for it, so the plugin doesn't send the legacy `context-1m-2025-08-07` header.

@@ -124,3 +124,15 @@ export function applyAccountLabelToConfig(
 
   return result
 }
+
+/**
+ * Where the active account label should appear.
+ *
+ * Env-var only. Upstream removed plugin-config.ts along with the single setting
+ * it carried, so reintroducing a config-file path would mean re-adding a file
+ * upstream deleted; the env var covers the same need without that divergence.
+ */
+export function getAccountLabelPlacement(): AccountLabelPlacement {
+  const env = process.env.CLAUDE_AUTH_ACCOUNT_LABEL
+  return isAccountLabelPlacement(env) ? env : DEFAULT_PLACEMENT
+}

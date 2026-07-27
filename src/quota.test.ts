@@ -264,21 +264,26 @@ describe("cache", () => {
   })
 })
 
-describe("refreshQuotas", () => {
-  const tmp = () => join(mkdtempSync(join(tmpdir(), "quota-probe-")), "q.json")
-  const acct = (n: string) => ({ source: n, accessToken: `tok-${n}` })
+const probeTmp = () =>
+  join(mkdtempSync(join(tmpdir(), "quota-probe-")), "q.json")
 
-  function fakeFetch(headersBySeq: Array<Record<string, string> | null>) {
-    let i = 0
-    const calls: string[] = []
-    const fn = async (url: string, init?: RequestInit) => {
-      const h = headersBySeq[i++] ?? null
-      const auth = (init?.headers as Record<string, string>)?.authorization
-      calls.push(auth ?? "none")
-      return { headers: new Headers(h ?? {}) } as unknown as Response
-    }
-    return { fn: fn as unknown as typeof fetch, calls }
+const acct = (n: string) => ({ source: n, accessToken: `tok-${n}` })
+
+/** Records the Authorization of each call and replays canned headers. */
+function fakeFetch(headersBySeq: Array<Record<string, string> | null>) {
+  let i = 0
+  const calls: string[] = []
+  const fn = async (_url: string, init?: RequestInit) => {
+    const h = headersBySeq[i++] ?? null
+    const auth = (init?.headers as Record<string, string>)?.authorization
+    calls.push(auth ?? "none")
+    return { headers: new Headers(h ?? {}) } as unknown as Response
   }
+  return { fn: fn as unknown as typeof fetch, calls }
+}
+
+describe("refreshQuotas", () => {
+  const tmp = probeTmp
 
   it("probes each account and caches what it learns", async () => {
     const p = tmp()

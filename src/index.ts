@@ -3,7 +3,10 @@ import crypto from "node:crypto"
 import { config } from "./model-config.ts"
 import { readAllClaudeAccounts, type ClaudeAccount } from "./keychain.ts"
 import { initLogger, log } from "./logger.ts"
-import { applyAccountLabelToConfig } from "./display.ts"
+import {
+  applyAccountLabelToConfig,
+  getAccountLabelPlacement,
+} from "./display.ts"
 import { buildAdvisory } from "./advisory.ts"
 import {
   formatQuotaPrefix,
@@ -21,21 +24,22 @@ import {
   isLongContextError,
   LONG_CONTEXT_BETAS,
 } from "./betas.ts"
-import { transformBody, transformResponseStream } from "./transforms.ts"
 import {
-  applyOpencodeConfig,
-  getAccountLabelPlacement,
-} from "./plugin-config.ts"
+  SYSTEM_IDENTITY,
+  transformBody,
+  transformResponseStream,
+} from "./transforms.ts"
 import {
-  getActiveAccountSource,
+  getActiveAccount,
   getCachedCredentials,
-  getCredentialsForSync,
+  reloadCredentialsFromSource,
   syncAuthJson,
   initAccounts,
   setActiveAccountSource,
   loadPersistedAccountSource,
   saveAccountSource,
   refreshAccountsList,
+  refreshIfNeeded,
   type ClaudeCredentials,
 } from "./credentials.ts"
 
@@ -50,6 +54,7 @@ export {
 export { resetExcludedBetas } from "./betas.ts"
 export {
   stripToolPrefix,
+  SYSTEM_IDENTITY,
   transformBody,
   transformResponseStream,
 } from "./transforms.ts"
@@ -60,13 +65,9 @@ export {
   type ClaudeCredentials,
 } from "./credentials.ts"
 export {
-  getAccountLabelPlacement,
-  isEnable1mContext,
-  type PluginSettings,
-} from "./plugin-config.ts"
-export {
   applyAccountLabelToConfig,
   decorateName,
+  getAccountLabelPlacement,
   type AccountLabelPlacement,
 } from "./display.ts"
 export {
@@ -75,9 +76,6 @@ export {
   computeVersionSuffix,
   extractFirstUserMessageText,
 } from "./signing.ts"
-
-const SYSTEM_IDENTITY_PREFIX =
-  "You are Claude Code, Anthropic's official CLI for Claude."
 
 function getCliVersion(): string {
   return process.env.ANTHROPIC_CLI_VERSION ?? config.ccVersion
@@ -239,6 +237,7 @@ export function buildRequestHeaders(
 }
 
 const SYNC_INTERVAL = 5 * 60 * 1000 // 5 minutes
+const PROACTIVE_REFRESH_THRESHOLD_MS = 60 * 60 * 1000 // 1 hour before expiry
 
 const plugin: Plugin = async ({ client }) => {
   initLogger()
@@ -325,10 +324,15 @@ const plugin: Plugin = async ({ client }) => {
     }
 
     // Give every switcher row a figure. Passive capture only ever learns about
-    // the account already serving traffic, which is the one the user knows.
-    // Detached: start-up must not wait on the network. Opt out with
-    // CLAUDE_AUTH_QUOTA_PROBE=0.
-    if (process.env.CLAUDE_AUTH_QUOTA_PROBE !== "0") {
+    // the account already serving traffic, which is the one the user already
+    // knows, so filling the rest needs a probe.
+    //
+    // Opt-in, not opt-out: this spends a request per account with the user's own
+    // tokens, and start-up is not an obvious place for unsolicited network
+    // traffic -- upstream's tests stub fetch and count calls, and quite
+    // reasonably did not expect init to make any. Passive capture keeps working
+    // regardless; set CLAUDE_AUTH_QUOTA_PROBE=1 to fill every switcher row.
+    if (process.env.CLAUDE_AUTH_QUOTA_PROBE === "1") {
       const probeTargets = accounts
         .map((a) => ({
           source: a.source,
@@ -347,7 +351,7 @@ const plugin: Plugin = async ({ client }) => {
             const advisory = buildAdvisory(
               accounts.map((a) => ({ source: a.source, label: a.label })),
               readQuotaCache(),
-              getActiveAccountSource(),
+              getActiveAccount()?.source ?? null,
             )
             if (!advisory) return
             await client.tui.showToast({
@@ -372,11 +376,43 @@ const plugin: Plugin = async ({ client }) => {
         .catch(() => {})
     }
 
-    // Keep auth.json synced with current credentials (no refresh triggered)
+    // Keep auth.json synced and proactively refresh before expiry.
+    // refreshIfNeeded() always resolves the currently ACTIVE account
+    // (via getActiveAccount() internally) — not a closure-captured account
+    // list — so this stays correct across account switches. Passing
+    // PROACTIVE_REFRESH_THRESHOLD_MS (1 hour) means it triggers a real
+    // OAuth refresh once the token is within that window of expiry, and
+    // simply returns the untouched credentials otherwise (no-op refresh).
+    // This prevents the "run `claude` to re-authenticate" message from
+    // appearing mid-session when the token silently expires.
+    let proactiveRefreshWarned = false
     const syncTimer = setInterval(() => {
       try {
-        const creds = getCredentialsForSync()
-        if (creds) syncAuthJson(creds)
+        const account = getActiveAccount()
+        log("proactive_refresh_check", {
+          source: account?.source ?? null,
+          expiresAt: account?.credentials?.expiresAt ?? null,
+          thresholdMs: PROACTIVE_REFRESH_THRESHOLD_MS,
+        })
+
+        const creds = refreshIfNeeded(undefined, PROACTIVE_REFRESH_THRESHOLD_MS)
+        if (creds) {
+          syncAuthJson(creds)
+          if (proactiveRefreshWarned) {
+            log("proactive_refresh_recovered", { source: account?.source })
+          }
+          proactiveRefreshWarned = false
+        } else {
+          log("proactive_refresh_failed", { source: account?.source })
+          // Only warn once per outage — otherwise this fires every
+          // SYNC_INTERVAL (5 min) for as long as refresh keeps failing.
+          if (!proactiveRefreshWarned) {
+            proactiveRefreshWarned = true
+            console.warn(
+              "opencode-claude-auth: Proactive token refresh failed. Run `claude` to re-authenticate.",
+            )
+          }
+        }
       } catch {
         // Non-fatal
       }
@@ -391,8 +427,6 @@ const plugin: Plugin = async ({ client }) => {
 
   return {
     config: async (opencodeConfig) => {
-      applyOpencodeConfig(opencodeConfig)
-
       // Show which account is serving this session. The switcher label is
       // otherwise visible only while the switcher is open, so with several
       // accounts configured nothing on screen tells them apart.
@@ -423,10 +457,10 @@ const plugin: Plugin = async ({ client }) => {
       }
 
       const hasIdentityPrefix = output.system.some((entry) =>
-        entry.includes(SYSTEM_IDENTITY_PREFIX),
+        entry.includes(SYSTEM_IDENTITY),
       )
       if (!hasIdentityPrefix) {
-        output.system.unshift(SYSTEM_IDENTITY_PREFIX)
+        output.system.unshift(SYSTEM_IDENTITY)
       }
     },
     auth: {
@@ -498,7 +532,9 @@ const plugin: Plugin = async ({ client }) => {
             const body = transformBody(requestInit.body)
 
             const headerKeys: string[] = []
-            headers.forEach((_, key) => headerKeys.push(key))
+            headers.forEach((_, key) => {
+              headerKeys.push(key)
+            })
             const betas = (headers.get("anthropic-beta") ?? "")
               .split(",")
               .filter(Boolean)
@@ -516,11 +552,14 @@ const plugin: Plugin = async ({ client }) => {
               retryAttempt: 0,
             })
 
-            // On 401, force a credential refresh and retry once.
-            // This handles the common case of token expiry mid-session.
+            // On 401, bypass the in-memory cache to pick up credentials rotated by
+            // another client, then retry once only when the access token changed.
+            let preserveResponseUnchanged = false
             if (response.status === 401) {
-              log("fetch_401_retry", { modelId })
-              const refreshed = getCachedCredentials()
+              let refreshed: ClaudeCredentials | null = null
+              try {
+                refreshed = reloadCredentialsFromSource()
+              } catch {}
               if (refreshed && refreshed.accessToken !== latest.accessToken) {
                 const retryHeaders = buildRequestHeaders(
                   input,
@@ -534,10 +573,8 @@ const plugin: Plugin = async ({ client }) => {
                   body,
                   headers: retryHeaders,
                 })
-                log("fetch_401_retry_result", {
-                  status: response.status,
-                  modelId,
-                })
+              } else {
+                preserveResponseUnchanged = true
               }
             }
 
@@ -589,7 +626,7 @@ const plugin: Plugin = async ({ client }) => {
               })
             }
 
-            // Log non-200 responses at warn level so they're visible in OpenCode
+            // Record non-200 responses without writing over OpenCode's terminal UI.
             if (!response.ok) {
               const status = response.status
               const cloned = response.clone()
@@ -605,9 +642,6 @@ const plugin: Plugin = async ({ client }) => {
                       parsed.error?.message ?? parsed.error?.type ?? errorBody
                   } catch {}
                   log("fetch_error_response", { status, modelId, message })
-                  console.warn(
-                    `opencode-claude-auth: API ${status} for ${modelId}: ${message}`,
-                  )
                 })
                 .catch(() => {})
             }
@@ -617,7 +651,7 @@ const plugin: Plugin = async ({ client }) => {
             // builds its rows synchronously so it cannot fetch them itself.
             try {
               const quota = parseQuotaHeaders(response.headers)
-              const source = getActiveAccountSource()
+              const source = getActiveAccount()?.source ?? null
               if (quota && source) {
                 writeQuotaForAccount(source, quota)
                 log("quota_observed", {
@@ -631,7 +665,9 @@ const plugin: Plugin = async ({ client }) => {
               // Never let bookkeeping break a response.
             }
 
-            return transformResponseStream(response)
+            return preserveResponseUnchanged
+              ? response
+              : transformResponseStream(response)
           },
         }
       },
@@ -655,10 +691,7 @@ const plugin: Plugin = async ({ client }) => {
                 options: currentAccounts.map((a) => ({
                   label: prefixWithQuota(a.label, a.source, quotaCache),
                   value: a.source,
-                  hint:
-                    a.source === currentSource
-                      ? `${a.source} (active)`
-                      : a.source,
+                  hint: a.source === currentSource ? "active" : undefined,
                 })),
               },
             ]
@@ -683,8 +716,8 @@ const plugin: Plugin = async ({ client }) => {
 
             const sourceDescription =
               chosen.source === "file"
-                ? "credentials file (~/.claude/.credentials.json)"
-                : "macOS Keychain"
+                ? `credentials file (${chosen.configDir ?? "~/.claude"}/.credentials.json)`
+                : `macOS Keychain (${chosen.source})`
 
             return {
               url: "",

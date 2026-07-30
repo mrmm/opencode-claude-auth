@@ -535,7 +535,9 @@ describe("structured envelope", () => {
     assert.equal(deriveLevel("refresh_exhausted"), "error")
     assert.equal(deriveLevel("refresh_cli_skipped"), "warn")
     assert.equal(deriveLevel("refresh_fallback_account"), "warn")
-    assert.equal(deriveLevel("cache_miss"), "warn")
+    // A cold-cache miss at start-up is routine; calling it a warning would
+    // make level filtering useless on the very first run.
+    assert.equal(deriveLevel("cache_miss"), "info")
     assert.equal(deriveLevel("plugin_init"), "info")
     assert.equal(deriveLevel("refresh_success"), "info")
   })
@@ -602,7 +604,7 @@ describe("level threshold", () => {
     return lines.map((l) => JSON.parse(l).event)
   }
 
-  const MIX = ["plugin_init", "cache_miss", "refresh_failed"]
+  const MIX = ["plugin_init", "refresh_cli_skipped", "refresh_failed"]
 
   it("logs everything at info", () => {
     assert.deepEqual(pass(undefined, MIX), MIX)
@@ -610,7 +612,10 @@ describe("level threshold", () => {
   })
 
   it("warn drops info", () => {
-    assert.deepEqual(pass("warn", MIX), ["cache_miss", "refresh_failed"])
+    assert.deepEqual(pass("warn", MIX), [
+      "refresh_cli_skipped",
+      "refresh_failed",
+    ])
   })
 
   it("error keeps only errors", () => {

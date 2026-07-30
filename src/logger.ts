@@ -210,7 +210,6 @@ const WARN_PATTERNS = [
   /_fallback/,
   /_no_[a-z]/,
   /_empty$/,
-  /_miss$/,
   /_warning$/,
   /_rate_limited/,
   /_stale$/,

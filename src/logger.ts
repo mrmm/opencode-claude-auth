@@ -272,11 +272,30 @@ function getDefaultLogPath(): string {
   return join(homedir(), ".local", "share", "opencode", "claude-auth-debug.log")
 }
 
-export function initLogger(options?: { stream?: Writable }): void {
+export type LoggerConfig = {
+  debug?: boolean | string
+  logLevel?: LogLevel
+  logEvents?: string
+  logMaxSizeBytes?: number
+  logKeep?: number
+}
+
+/**
+ * Initialise logging.
+ *
+ * `config` comes from the resolved config layers when the plugin supplies it;
+ * the environment is used directly otherwise, so the logger still works when
+ * used standalone or in tests.
+ */
+export function initLogger(options?: {
+  stream?: Writable
+  config?: LoggerConfig
+}): void {
   closeLogger()
 
-  compileEventSpec(process.env.CLAUDE_AUTH_DEBUG_EVENTS)
-  minLevel = parseLevel(process.env.CLAUDE_AUTH_DEBUG_LEVEL)
+  const cfg = options?.config
+  compileEventSpec(cfg?.logEvents ?? process.env.CLAUDE_AUTH_DEBUG_EVENTS)
+  minLevel = cfg?.logLevel ?? parseLevel(process.env.CLAUDE_AUTH_DEBUG_LEVEL)
 
   if (options?.stream) {
     mode = "stream"
@@ -284,20 +303,19 @@ export function initLogger(options?: { stream?: Writable }): void {
     return
   }
 
-  compileEventSpec(process.env.CLAUDE_AUTH_DEBUG_EVENTS)
-  minLevel = parseLevel(process.env.CLAUDE_AUTH_DEBUG_LEVEL)
-
-  const envVal = process.env.CLAUDE_AUTH_DEBUG
-  if (!envVal) {
+  const debug = cfg?.debug ?? process.env.CLAUDE_AUTH_DEBUG
+  if (!debug || debug === "0" || debug === "false") {
     mode = "disabled"
     return
   }
 
   mode = "file"
-  logFilePath = envVal === "1" ? getDefaultLogPath() : envVal
+  logFilePath =
+    debug === true || debug === "1" ? getDefaultLogPath() : String(debug)
 
-  maxBytes = parseSize(process.env.CLAUDE_AUTH_DEBUG_MAX_SIZE)
-  keepFiles = parseKeep(process.env.CLAUDE_AUTH_DEBUG_KEEP)
+  maxBytes =
+    cfg?.logMaxSizeBytes ?? parseSize(process.env.CLAUDE_AUTH_DEBUG_MAX_SIZE)
+  keepFiles = cfg?.logKeep ?? parseKeep(process.env.CLAUDE_AUTH_DEBUG_KEEP)
 
   const dir = dirname(logFilePath)
   if (!existsSync(dir)) {

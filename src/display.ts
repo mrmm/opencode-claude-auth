@@ -128,11 +128,19 @@ export function applyAccountLabelToConfig(
 /**
  * Where the active account label should appear.
  *
- * Env-var only. Upstream removed plugin-config.ts along with the single setting
- * it carried, so reintroducing a config-file path would mean re-adding a file
- * upstream deleted; the env var covers the same need without that divergence.
+ * Resolved through the config layers (file, inline, environment) rather than
+ * read from the environment directly, so it can be changed without a restart.
+ * Imported lazily to keep display.ts free of a cycle: config.ts needs the
+ * placement validator from here.
  */
 export function getAccountLabelPlacement(): AccountLabelPlacement {
-  const env = process.env.CLAUDE_AUTH_ACCOUNT_LABEL
-  return isAccountLabelPlacement(env) ? env : DEFAULT_PLACEMENT
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getConfig } = require("./config.ts") as {
+      getConfig: () => { accountLabel: AccountLabelPlacement }
+    }
+    return getConfig().accountLabel
+  } catch {
+    return DEFAULT_PLACEMENT
+  }
 }

@@ -130,22 +130,61 @@ Disable when done:
 unset CLAUDE_AUTH_DEBUG
 ```
 
+## Configuration
+
+Settings live in `~/.config/opencode/claude-auth.jsonc`. Edits apply within a
+few seconds — no new shell, no OpenCode restart, which is the main reason to
+prefer it over environment variables.
+
+```jsonc
+{
+  "debug": true, // true, false, or a log file path
+  "logLevel": "info", // info | warn | error
+  "logEvents": "", // "refresh,quota", "*_failed", "-keychain", "errors"
+  "logMaxSize": "5MB",
+  "logKeep": 3,
+  "quotaProbe": true, // fill every switcher row with quota
+  "toastOnRefresh": false, // failures always toast; this adds successes
+  "accountLabel": "both", // provider | model | both | off
+}
+```
+
+Precedence, least specific first:
+
+1. defaults
+2. `~/.config/opencode/claude-auth.jsonc`
+3. `<project>/claude-auth.jsonc`
+4. inline options in `opencode.jsonc` — `["...opencode-claude-auth", { "quotaProbe": true }]`
+5. `CLAUDE_AUTH_*` environment variables
+
+Environment stays highest so a single command can override without editing
+anything (`CLAUDE_AUTH_DEBUG_EVENTS=refresh opencode`), but it is no longer
+where configuration is expected to live. A malformed file contributes nothing
+rather than failing the plugin.
+
 ### Log format
 
 Each line is one JSON object with a fixed envelope, so a log can be filtered and
 aggregated without knowing the event vocabulary:
 
 ```json
-{"v":1,"ts":"2026-07-30T16:38:47.440Z","sid":"0ehcaahc","level":"info",
- "group":"keychain","event":"keychain_list","servicesFound":["..."]}
+{
+  "v": 1,
+  "ts": "2026-07-30T16:38:47.440Z",
+  "sid": "0ehcaahc",
+  "level": "info",
+  "group": "keychain",
+  "event": "keychain_list",
+  "servicesFound": ["..."]
+}
 ```
 
-| field   | meaning                                                                 |
-| ------- | ----------------------------------------------------------------------- |
-| `v`     | schema version                                                          |
-| `sid`   | per-process id — several opencode processes append to one file          |
-| `level` | `info` / `warn` / `error`, derived from the event name                  |
-| `group` | event family (`refresh`, `keychain`, `quota`, …)                        |
+| field   | meaning                                                        |
+| ------- | -------------------------------------------------------------- |
+| `v`     | schema version                                                 |
+| `sid`   | per-process id — several opencode processes append to one file |
+| `level` | `info` / `warn` / `error`, derived from the event name         |
+| `group` | event family (`refresh`, `keychain`, `quota`, …)               |
 
 `CLAUDE_AUTH_DEBUG_LEVEL=warn` (or `error`) drops everything below that level.
 

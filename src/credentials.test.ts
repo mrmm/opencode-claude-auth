@@ -1147,10 +1147,12 @@ describe("parseOAuthResponse", () => {
   })
 })
 
-describe("OAuth transport selection", () => {
-  const fakeWhich = (present: string[]) => (b: string) =>
-    present.includes(b) ? `/usr/bin/${b}` : null
+/** Pretends the named binaries exist on PATH. Hoisted: oxlint objects to
+ * recreating it per call, and it holds no state. */
+const fakeWhich = (present: string[]) => (b: string) =>
+  present.includes(b) ? `/usr/bin/${b}` : null
 
+describe("OAuth transport selection", () => {
   it("prefers curl, which needs no JS-in-argv quoting", () => {
     const t = resolvePostTransports(
       "/usr/bin/node",

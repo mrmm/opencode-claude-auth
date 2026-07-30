@@ -1,4 +1,4 @@
-import type { Plugin } from "@opencode-ai/plugin"
+import type { Plugin, PluginInput } from "@opencode-ai/plugin"
 import crypto from "node:crypto"
 import { config } from "./model-config.ts"
 import { readAllClaudeAccounts, type ClaudeAccount } from "./keychain.ts"
@@ -9,6 +9,7 @@ import {
 } from "./display.ts"
 import { buildAdvisory, noticeKey, noticeToToast } from "./advisory.ts"
 import { setNoticeSink } from "./notify.ts"
+import { getConfig, primeConfig } from "./config.ts"
 import {
   formatQuotaPrefix,
   parseQuotaHeaders,
@@ -240,8 +241,30 @@ export function buildRequestHeaders(
 const SYNC_INTERVAL = 5 * 60 * 1000 // 5 minutes
 const PROACTIVE_REFRESH_THRESHOLD_MS = 60 * 60 * 1000 // 1 hour before expiry
 
-const plugin: Plugin = async ({ client }) => {
-  initLogger()
+// The installed @opencode-ai/plugin types declare a single parameter, but the
+// runtime passes inline options from opencode.jsonc as a second argument -- the
+// mechanism other plugins already rely on. Typed explicitly rather than left
+// implicitly `any`.
+/**
+ * The runtime passes inline options from opencode.jsonc as a second argument --
+ * the mechanism other plugins already use -- but the installed
+ * @opencode-ai/plugin types declare only one. Widening the signature here keeps
+ * the hooks contextually typed, where a blanket cast would make every hook
+ * parameter implicitly `any`.
+ */
+type PluginWithOptions = (
+  input: PluginInput,
+  options?: unknown,
+) => ReturnType<Plugin>
+
+const plugin: PluginWithOptions = async (
+  { client, directory, worktree },
+  options,
+) => {
+  // Inline options from opencode.jsonc are only visible here, so record them
+  // once; file layers are re-read on change afterwards.
+  const cfg = primeConfig(worktree || directory, options)
+  initLogger({ config: cfg })
 
   let accounts: ClaudeAccount[] = []
   try {
@@ -333,7 +356,7 @@ const plugin: Plugin = async ({ client }) => {
     setNoticeSink((notice) => {
       try {
         const advisory = noticeToToast(notice, {
-          showSuccess: process.env.CLAUDE_AUTH_TOAST_REFRESH === "1",
+          showSuccess: getConfig().toastOnRefresh,
         })
         if (!advisory) return
 
@@ -374,7 +397,7 @@ const plugin: Plugin = async ({ client }) => {
     // traffic -- upstream's tests stub fetch and count calls, and quite
     // reasonably did not expect init to make any. Passive capture keeps working
     // regardless; set CLAUDE_AUTH_QUOTA_PROBE=1 to fill every switcher row.
-    if (process.env.CLAUDE_AUTH_QUOTA_PROBE === "1") {
+    if (getConfig().quotaProbe) {
       const probeTargets = accounts
         .map((a) => ({
           source: a.source,
@@ -794,5 +817,5 @@ const plugin: Plugin = async ({ client }) => {
   }
 }
 
-export const ClaudeAuthPlugin = plugin
-export default plugin
+export const ClaudeAuthPlugin = plugin as unknown as Plugin
+export default ClaudeAuthPlugin

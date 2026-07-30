@@ -8,6 +8,7 @@ import {
 import {
   chmodSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   statSync,
   writeFileSync,
@@ -16,6 +17,25 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
+
+/**
+ * Copy every non-test module next to this file into `tempDir`.
+ *
+ * These tests import a rewritten copy of credentials.ts from a temp directory,
+ * so everything it can reach must exist there too. Naming the modules by hand
+ * has broken four times now, each time surfacing only as ERR_MODULE_NOT_FOUND
+ * against a temp path. Callers write their stubs after this runs, so a stub
+ * still overrides the real module.
+ */
+async function copySiblingModules(tempDir: string): Promise<void> {
+  const here = new URL(".", import.meta.url)
+  for (const name of readdirSync(here)) {
+    if (!name.endsWith(".ts") || name.endsWith(".test.ts")) continue
+    if (name === "credentials.ts") continue // the caller writes a rewritten copy
+    const src = await readFile(new URL(name, here), "utf8")
+    await writeFile(join(tempDir, name), src, "utf8")
+  }
+}
 
 type Creds = {
   accessToken: string
@@ -53,6 +73,7 @@ async function loadCredentialsWithCountingKeychain(
   }
 }> {
   const tempDir = await mkdtemp(join(tmpdir(), "opencode-claude-auth-creds-"))
+  await copySiblingModules(tempDir)
   const tempKeychain = join(tempDir, "keychain.ts")
   const tempBetas = join(tempDir, "betas.ts")
   const tempChildProcess = join(tempDir, "child-process.ts")
@@ -895,6 +916,7 @@ describe("syncAuthJson file permissions", () => {
       const tempDir = await mkdtemp(
         join(tmpdir(), "opencode-claude-auth-sync-"),
       )
+      await copySiblingModules(tempDir)
       const tempCredentials = join(tempDir, "credentials.ts")
       const tempKeychain = join(tempDir, "keychain.ts")
       const tempBetas = join(tempDir, "betas.ts")
@@ -980,6 +1002,7 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
       const tempDir = await mkdtemp(
         join(tmpdir(), "opencode-claude-auth-sync2-"),
       )
+      await copySiblingModules(tempDir)
       const tempCredentials = join(tempDir, "credentials.ts")
       const tempKeychain = join(tempDir, "keychain.ts")
       const tempBetas = join(tempDir, "betas.ts")

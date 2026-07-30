@@ -174,6 +174,91 @@ export function rotateLog(path: string, keep: number): void {
   }
 }
 
+/**
+ * Line schema, v1.
+ *
+ * Every line carries the same envelope so a reader never has to know the event
+ * vocabulary to make sense of it:
+ *
+ *   { v, ts, sid, level, group, event, ...payload }
+ *
+ * - v      schema version, so a parser can evolve without guessing
+ * - sid    per-process id. Several opencode processes append to one file, and
+ *          without this their lines interleave with no way to attribute them
+ * - level  info | warn | error, derived from the event name so severity is
+ *          filterable without enumerating 50+ events
+ * - group  the family the event belongs to, for aggregation
+ *
+ * Derivation is by pattern rather than a per-event table: a table of that size
+ * rots silently as events are added, whereas a new *_failed event is classified
+ * correctly the moment it is written.
+ */
+export const LOG_SCHEMA_VERSION = 1
+
+export type LogLevel = "info" | "warn" | "error"
+
+const ERROR_PATTERNS = [
+  /_failed$/,
+  /_error$/,
+  /_error_/,
+  /_exhausted$/,
+  /_unavailable$/,
+]
+const WARN_PATTERNS = [
+  /_skipped$/,
+  /_invalid/,
+  /_fallback/,
+  /_no_[a-z]/,
+  /_empty$/,
+  /_miss$/,
+  /_warning$/,
+  /_rate_limited/,
+  /_stale$/,
+]
+
+/** Severity for an event, overridable by passing `level` in the payload. */
+export function deriveLevel(event: string, explicit?: unknown): LogLevel {
+  if (explicit === "info" || explicit === "warn" || explicit === "error") {
+    return explicit
+  }
+  const e = event ?? ""
+  if (ERROR_PATTERNS.some((r) => r.test(e))) return "error"
+  if (WARN_PATTERNS.some((r) => r.test(e))) return "warn"
+  return "info"
+}
+
+/** Longest known category prefix, else the segment before the first underscore. */
+export function deriveGroup(event: string): string {
+  const e = event ?? ""
+  let best = ""
+  for (const c of LOG_CATEGORIES) {
+    if ((e === c || e.startsWith(`${c}_`)) && c.length > best.length) best = c
+  }
+  if (best) return best
+  const i = e.indexOf("_")
+  return i > 0 ? e.slice(0, i) : e || "unknown"
+}
+
+/** Short, stable id for this process, so interleaved lines can be separated. */
+const SESSION_ID = Math.random().toString(36).slice(2, 10)
+
+export function sessionId(): string {
+  return SESSION_ID
+}
+
+/** Minimum severity to record; set via CLAUDE_AUTH_DEBUG_LEVEL. */
+const LEVEL_ORDER: Record<LogLevel, number> = { info: 0, warn: 1, error: 2 }
+let minLevel: LogLevel = "info"
+
+export function parseLevel(input: string | undefined): LogLevel {
+  const v = (input ?? "").trim().toLowerCase()
+  return v === "warn" || v === "warning"
+    ? "warn"
+    : v === "error"
+      ? "error"
+      : "info"
+}
+
 type LogMode = "disabled" | "file" | "stream"
 
 let mode: LogMode = "disabled"
@@ -191,6 +276,7 @@ export function initLogger(options?: { stream?: Writable }): void {
   closeLogger()
 
   compileEventSpec(process.env.CLAUDE_AUTH_DEBUG_EVENTS)
+  minLevel = parseLevel(process.env.CLAUDE_AUTH_DEBUG_LEVEL)
 
   if (options?.stream) {
     mode = "stream"
@@ -199,6 +285,7 @@ export function initLogger(options?: { stream?: Writable }): void {
   }
 
   compileEventSpec(process.env.CLAUDE_AUTH_DEBUG_EVENTS)
+  minLevel = parseLevel(process.env.CLAUDE_AUTH_DEBUG_LEVEL)
 
   const envVal = process.env.CLAUDE_AUTH_DEBUG
   if (!envVal) {
@@ -237,10 +324,21 @@ export function log(event: string, data?: Record<string, unknown>): void {
   if (mode === "disabled") return
   if (!eventEnabled(event)) return
 
+  const { level: explicitLevel, ...payload } = (data ?? {}) as Record<
+    string,
+    unknown
+  >
+  const level = deriveLevel(event, explicitLevel)
+  if (LEVEL_ORDER[level] < LEVEL_ORDER[minLevel]) return
+
   const entry = {
+    v: LOG_SCHEMA_VERSION,
     ts: new Date().toISOString(),
+    sid: SESSION_ID,
+    level,
+    group: deriveGroup(event),
     event,
-    ...redact(data ?? {}),
+    ...redact(payload),
   }
   const line = JSON.stringify(entry) + "\n"
 
@@ -264,6 +362,7 @@ export function closeLogger(): void {
   bytesWritten = 0
   maxBytes = DEFAULT_MAX_BYTES
   keepFiles = DEFAULT_KEEP
+  minLevel = "info"
   logFilePath = null
   logStream = null
 }

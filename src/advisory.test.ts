@@ -3,6 +3,8 @@ import { describe, it } from "node:test"
 
 import {
   bestAlternative,
+  noticeKey,
+  noticeToToast,
   buildAdvisory,
   shortenLabel,
   type AdvisoryAccount,
@@ -170,5 +172,94 @@ describe("buildAdvisory", () => {
   it("falls back to the source when the label is unknown", () => {
     const a = buildAdvisory([], { unknown: q(1.0) }, "unknown", NOW)
     assert.match(a?.message ?? "", /^unknown at 100%/)
+  })
+})
+
+describe("refresh notices", () => {
+  it("shows a failure, with the remedy", () => {
+    const t = noticeToToast({
+      kind: "refresh-failed",
+      source: "Claude Team - Team A",
+      reason: "every refresh path failed",
+    })
+    assert.equal(t?.variant, "error")
+    assert.match(t?.message ?? "", /every refresh path failed/)
+    assert.match(t?.message ?? "", /re-authenticate/)
+  })
+
+  it("shows a silent account switch — it spends another account's quota", () => {
+    const t = noticeToToast({
+      kind: "account-switched",
+      failedSource: "Claude Team - Team A",
+      usedSource: "Claude Team - Team B",
+    })
+    assert.equal(t?.variant, "warning")
+    assert.match(t?.message ?? "", /Team A could not be refreshed/)
+    assert.match(t?.message ?? "", /using Team B/)
+  })
+
+  it("stays quiet about a routine successful refresh by default", () => {
+    const n = {
+      kind: "refresh-succeeded" as const,
+      source: "acct",
+      extendedByMinutes: 480,
+      via: "oauth",
+    }
+    assert.equal(noticeToToast(n), undefined)
+    assert.equal(noticeToToast(n, { showSuccess: true })?.variant, "success")
+  })
+
+  it("reports how much validity a refresh actually bought", () => {
+    const t = noticeToToast(
+      {
+        kind: "refresh-succeeded",
+        source: "acct",
+        extendedByMinutes: 480,
+        via: "oauth",
+      },
+      { showSuccess: true },
+    )
+    assert.match(t?.message ?? "", /extended by 8h/)
+  })
+
+  it("does not claim an extension when the expiry did not move", () => {
+    const t = noticeToToast(
+      {
+        kind: "refresh-succeeded",
+        source: "acct",
+        extendedByMinutes: 0,
+        via: "cli",
+      },
+      { showSuccess: true },
+    )
+    assert.ok(!/extended by/.test(t?.message ?? ""))
+    assert.match(t?.message ?? "", /refreshed via cli/)
+  })
+
+  it("keys notices so a repeat can be suppressed", () => {
+    const a = noticeKey({ kind: "refresh-failed", source: "x", reason: "r" })
+    const b = noticeKey({
+      kind: "refresh-failed",
+      source: "x",
+      reason: "different",
+    })
+    const c = noticeKey({ kind: "refresh-failed", source: "y", reason: "r" })
+    assert.equal(a, b, "same account+kind must collapse regardless of reason")
+    assert.notEqual(a, c, "a different account is a different notice")
+  })
+
+  it("distinguishes switch pairs", () => {
+    assert.notEqual(
+      noticeKey({
+        kind: "account-switched",
+        failedSource: "a",
+        usedSource: "b",
+      }),
+      noticeKey({
+        kind: "account-switched",
+        failedSource: "a",
+        usedSource: "c",
+      }),
+    )
   })
 })

@@ -11,6 +11,7 @@
  * unless something is actually actionable.
  */
 
+import type { Notice } from "./notify.ts"
 import {
   bindingWindow,
   formatDuration,
@@ -137,4 +138,71 @@ export function buildAdvisory(
   }
 
   return undefined
+}
+
+// ---------------------------------------------------------------------------
+// Refresh notices
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether a refresh notice is worth a toast, and what it should say.
+ *
+ * Deliberately asymmetric. A failure and a silent account switch both change
+ * which credentials serve your requests without you asking, so they are shown by
+ * default. A successful refresh is routine -- it happens every few hours by
+ * design -- so it is opt-in via CLAUDE_AUTH_TOAST_REFRESH=1; showing it always
+ * would train you to ignore the toasts that matter.
+ *
+ * Latching is the caller's job: this function is pure so the policy can be
+ * tested without a clock or a client.
+ */
+export function noticeToToast(
+  notice: Notice,
+  opts: { showSuccess?: boolean } = {},
+): Advisory | undefined {
+  switch (notice.kind) {
+    case "refresh-failed":
+      return {
+        variant: "error",
+        title: "Claude token refresh failed",
+        message: `${shortenLabel(notice.source)}: ${notice.reason}. Run \`claude\` to re-authenticate.`,
+      }
+
+    case "account-switched":
+      // This one was invisible: the plugin served a different account 304 times
+      // without saying so, which silently spends another account's quota.
+      return {
+        variant: "warning",
+        title: "Claude account switched",
+        message: `${shortenLabel(notice.failedSource)} could not be refreshed; using ${shortenLabel(notice.usedSource)} instead.`,
+      }
+
+    case "refresh-succeeded":
+      if (!opts.showSuccess) return undefined
+      return {
+        variant: "success",
+        title: "Claude token refreshed",
+        message:
+          notice.extendedByMinutes > 0
+            ? `${shortenLabel(notice.source)} extended by ${formatDuration(notice.extendedByMinutes * 60)} via ${notice.via}.`
+            : `${shortenLabel(notice.source)} refreshed via ${notice.via}.`,
+      }
+
+    default:
+      return undefined
+  }
+}
+
+/** Key used to avoid repeating the same notice over and over. */
+export function noticeKey(notice: Notice): string {
+  switch (notice.kind) {
+    case "refresh-failed":
+      return `failed:${notice.source}`
+    case "account-switched":
+      return `switched:${notice.failedSource}->${notice.usedSource}`
+    case "refresh-succeeded":
+      return `ok:${notice.source}`
+    default:
+      return "unknown"
+  }
 }

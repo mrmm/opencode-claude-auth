@@ -7,7 +7,8 @@ import {
   applyAccountLabelToConfig,
   getAccountLabelPlacement,
 } from "./display.ts"
-import { buildAdvisory } from "./advisory.ts"
+import { buildAdvisory, noticeKey, noticeToToast } from "./advisory.ts"
+import { setNoticeSink } from "./notify.ts"
 import {
   formatQuotaPrefix,
   parseQuotaHeaders,
@@ -322,6 +323,47 @@ const plugin: Plugin = async ({ client }) => {
         "opencode-claude-auth: Claude credentials are expired and could not be refreshed. Run `claude` to re-authenticate.",
       )
     }
+
+    // Surface credential events that change which account serves requests.
+    // A refresh failing, or the plugin quietly falling back to a different
+    // account, both happen without any user action and were previously visible
+    // only in a log file nobody had enabled.
+    const shownNotices = new Map<string, number>()
+    const NOTICE_COOLDOWN_MS = 10 * 60 * 1000
+    setNoticeSink((notice) => {
+      try {
+        const advisory = noticeToToast(notice, {
+          showSuccess: process.env.CLAUDE_AUTH_TOAST_REFRESH === "1",
+        })
+        if (!advisory) return
+
+        // The same condition repeats every sync tick while it persists; say it
+        // once, then stay quiet for a while.
+        const key = noticeKey(notice)
+        const last = shownNotices.get(key) ?? 0
+        if (Date.now() - last < NOTICE_COOLDOWN_MS) return
+        shownNotices.set(key, Date.now())
+
+        void client.tui
+          .showToast({
+            body: {
+              title: advisory.title,
+              message: advisory.message,
+              variant: advisory.variant,
+              duration: advisory.variant === "error" ? 15_000 : 10_000,
+            },
+          })
+          .catch(() => {})
+        log("credential_notice_shown", {
+          kind: notice.kind,
+          variant: advisory.variant,
+        })
+      } catch (err) {
+        log("credential_notice_failed", {
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+    })
 
     // Give every switcher row a figure. Passive capture only ever learns about
     // the account already serving traffic, which is the one the user already

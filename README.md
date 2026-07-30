@@ -130,6 +130,25 @@ Disable when done:
 unset CLAUDE_AUTH_DEBUG
 ```
 
+### Log format
+
+Each line is one JSON object with a fixed envelope, so a log can be filtered and
+aggregated without knowing the event vocabulary:
+
+```json
+{"v":1,"ts":"2026-07-30T16:38:47.440Z","sid":"0ehcaahc","level":"info",
+ "group":"keychain","event":"keychain_list","servicesFound":["..."]}
+```
+
+| field   | meaning                                                                 |
+| ------- | ----------------------------------------------------------------------- |
+| `v`     | schema version                                                          |
+| `sid`   | per-process id — several opencode processes append to one file          |
+| `level` | `info` / `warn` / `error`, derived from the event name                  |
+| `group` | event family (`refresh`, `keychain`, `quota`, …)                        |
+
+`CLAUDE_AUTH_DEBUG_LEVEL=warn` (or `error`) drops everything below that level.
+
 ### Choosing what to log
 
 A start-up logs around thirty lines across a dozen event types, most of which are
@@ -154,6 +173,21 @@ Groups: `account`, `auth`, `cache`, `credentials`, `fetch`, `keychain`, `plugin`
 `proactive_refresh`, `quota`, `refresh`, `sync`, `writeback`.
 
 Logs are written to a file, never to the terminal, so they cannot corrupt the TUI.
+
+### Notifications
+
+Some credential events change which account serves your requests without any
+action on your part, and were previously visible only in the log. These raise a
+toast:
+
+- a refresh that failed on every path,
+- a silent fallback to a different account because the intended one could not be
+  refreshed.
+
+A successful refresh is routine and stays quiet unless
+`CLAUDE_AUTH_TOAST_REFRESH=1` is set. Repeats of the same condition are
+suppressed for ten minutes, so a persistent failure notifies once rather than
+every sync tick.
 
 ## Long context (1M)
 

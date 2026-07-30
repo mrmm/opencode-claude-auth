@@ -17,6 +17,7 @@ import {
   type ClaudeCredentials,
 } from "./keychain.ts"
 import { resetExcludedBetas } from "./betas.ts"
+import { emitNotice } from "./notify.ts"
 import { log } from "./logger.ts"
 
 export type { ClaudeAccount } from "./keychain.ts"
@@ -321,7 +322,12 @@ export function refreshViaOAuth(
         })
         continue
       }
-      log("refresh_success", { source: "oauth", transport: transport.name })
+      log("refresh_success", {
+        source: "oauth",
+        transport: transport.name,
+        expiresAt: creds.expiresAt,
+        validForMinutes: Math.round((creds.expiresAt - Date.now()) / 60_000),
+      })
       return creds
     } catch (err) {
       log("refresh_failed", {
@@ -404,6 +410,8 @@ export function refreshIfNeeded(
   const creds = target.credentials
   if (creds.expiresAt > Date.now() + thresholdMs) return creds
 
+  const previousExpiry = creds.expiresAt
+
   log("refresh_needed", {
     source: target.source,
     expiresAt: creds.expiresAt,
@@ -413,6 +421,15 @@ export function refreshIfNeeded(
   if (creds.refreshToken) {
     const oauthCreds = refreshViaOAuth(creds.refreshToken)
     if (oauthCreds && oauthCreds.expiresAt > Date.now() + 60_000) {
+      emitNotice({
+        kind: "refresh-succeeded",
+        source: target.source,
+        extendedByMinutes: Math.max(
+          0,
+          Math.round((oauthCreds.expiresAt - previousExpiry) / 60_000),
+        ),
+        via: "oauth",
+      })
       target.credentials = oauthCreds
       writeBackCredentials(target.source, oauthCreds, target.configDir)
       return oauthCreds
@@ -431,6 +448,11 @@ export function refreshIfNeeded(
       return fallback
     }
 
+    emitNotice({
+      kind: "refresh-failed",
+      source: target.source,
+      reason: "every refresh path failed",
+    })
     log("refresh_exhausted", {
       source: target.source,
       hadCredentials: false,
@@ -474,6 +496,11 @@ function tryFallbackAccount(excludeSource: string): ClaudeCredentials | null {
     if (account.credentials.expiresAt > now + 60_000) {
       log("refresh_fallback_account", {
         failedSource: excludeSource,
+        usedSource: account.source,
+      })
+      emitNotice({
+        kind: "account-switched",
+        failedSource: excludeSource ?? "(unknown)",
         usedSource: account.source,
       })
       return account.credentials

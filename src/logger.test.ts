@@ -13,6 +13,11 @@ import { tmpdir } from "node:os"
 import { PassThrough } from "node:stream"
 import {
   closeLogger,
+  deriveGroup,
+  deriveLevel,
+  LOG_SCHEMA_VERSION,
+  parseLevel,
+  sessionId,
   initLogger,
   log,
   parseKeep,
@@ -494,5 +499,127 @@ describe("rotation while logging", () => {
 
     assert.equal(readFileSync(`${p}.1`, "utf-8").length, 1000)
     assert.equal(readFileSync(p, "utf-8").trim().split("\n").length, 1)
+  })
+})
+
+describe("structured envelope", () => {
+  function emit(event: string, data?: Record<string, unknown>) {
+    const lines: string[] = []
+    initLogger({
+      stream: { write: (c: string) => lines.push(String(c)) } as never,
+    })
+    log(event, data)
+    closeLogger()
+    return JSON.parse(lines[0])
+  }
+
+  it("carries a self-describing envelope", () => {
+    const e = emit("refresh_started", { source: "x" })
+    assert.equal(e.v, LOG_SCHEMA_VERSION)
+    assert.equal(e.event, "refresh_started")
+    assert.equal(e.group, "refresh")
+    assert.equal(e.level, "info")
+    assert.equal(e.source, "x")
+    assert.match(e.ts, /^\d{4}-\d{2}-\d{2}T/)
+    assert.match(e.sid, /^[a-z0-9]{4,}$/)
+  })
+
+  it("gives every line from one process the same sid", () => {
+    assert.equal(emit("a_one").sid, emit("a_two").sid)
+    assert.equal(emit("a_one").sid, sessionId())
+  })
+
+  it("derives severity from the event name", () => {
+    assert.equal(deriveLevel("refresh_failed"), "error")
+    assert.equal(deriveLevel("keychain_read_error"), "error")
+    assert.equal(deriveLevel("refresh_exhausted"), "error")
+    assert.equal(deriveLevel("refresh_cli_skipped"), "warn")
+    assert.equal(deriveLevel("refresh_fallback_account"), "warn")
+    assert.equal(deriveLevel("cache_miss"), "warn")
+    assert.equal(deriveLevel("plugin_init"), "info")
+    assert.equal(deriveLevel("refresh_success"), "info")
+  })
+
+  it("lets a caller override the derived level", () => {
+    assert.equal(deriveLevel("plugin_init", "error"), "error")
+    assert.equal(emit("plugin_init", { level: "warn" }).level, "warn")
+  })
+
+  it("does not leak the level override into the payload", () => {
+    assert.equal(
+      Object.hasOwn(emit("plugin_init", { level: "warn" }), "level"),
+      true,
+    )
+    const e = emit("plugin_init", { level: "warn", a: 1 })
+    assert.equal(e.level, "warn")
+    assert.equal(e.a, 1)
+  })
+
+  it("groups by the longest known category, not the first underscore", () => {
+    // proactive_refresh_* is its own family, not "proactive".
+    assert.equal(deriveGroup("proactive_refresh_check"), "proactive_refresh")
+    assert.equal(deriveGroup("refresh_started"), "refresh")
+    assert.equal(deriveGroup("quota_probe"), "quota")
+    assert.equal(deriveGroup("keychain_read"), "keychain")
+  })
+
+  it("falls back to a sensible group for unknown events", () => {
+    assert.equal(deriveGroup("brandnew_thing"), "brandnew")
+    assert.equal(deriveGroup("solo"), "solo")
+    assert.equal(deriveGroup(""), "unknown")
+  })
+
+  it("still redacts secrets inside the envelope", () => {
+    const e = emit("fetch_credentials", {
+      accessToken: "sk-abc",
+      refreshToken: "r",
+    })
+    assert.equal(e.accessToken, "REDACTED")
+    assert.equal(e.refreshToken, "REDACTED")
+  })
+})
+
+describe("level threshold", () => {
+  let saved: string | undefined
+  beforeEach(() => {
+    saved = process.env.CLAUDE_AUTH_DEBUG_LEVEL
+  })
+  afterEach(() => {
+    if (saved === undefined) delete process.env.CLAUDE_AUTH_DEBUG_LEVEL
+    else process.env.CLAUDE_AUTH_DEBUG_LEVEL = saved
+    closeLogger()
+  })
+
+  function pass(level: string | undefined, events: string[]) {
+    if (level === undefined) delete process.env.CLAUDE_AUTH_DEBUG_LEVEL
+    else process.env.CLAUDE_AUTH_DEBUG_LEVEL = level
+    const lines: string[] = []
+    initLogger({
+      stream: { write: (c: string) => lines.push(String(c)) } as never,
+    })
+    for (const e of events) log(e)
+    closeLogger()
+    return lines.map((l) => JSON.parse(l).event)
+  }
+
+  const MIX = ["plugin_init", "cache_miss", "refresh_failed"]
+
+  it("logs everything at info", () => {
+    assert.deepEqual(pass(undefined, MIX), MIX)
+    assert.deepEqual(pass("info", MIX), MIX)
+  })
+
+  it("warn drops info", () => {
+    assert.deepEqual(pass("warn", MIX), ["cache_miss", "refresh_failed"])
+  })
+
+  it("error keeps only errors", () => {
+    assert.deepEqual(pass("error", MIX), ["refresh_failed"])
+  })
+
+  it("treats an unrecognised value as info rather than silencing the log", () => {
+    assert.deepEqual(pass("verbose", MIX), MIX)
+    assert.equal(parseLevel("nonsense"), "info")
+    assert.equal(parseLevel("WARNING"), "warn")
   })
 })

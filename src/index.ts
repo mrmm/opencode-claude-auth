@@ -238,9 +238,6 @@ export function buildRequestHeaders(
   return headers
 }
 
-const SYNC_INTERVAL = 5 * 60 * 1000 // 5 minutes
-const PROACTIVE_REFRESH_THRESHOLD_MS = 60 * 60 * 1000 // 1 hour before expiry
-
 // The installed @opencode-ai/plugin types declare a single parameter, but the
 // runtime passes inline options from opencode.jsonc as a second argument -- the
 // mechanism other plugins already rely on. Typed explicitly rather than left
@@ -324,6 +321,34 @@ const plugin: PluginWithOptions = async (
     }
   }
 
+  /**
+   * Top up quota readings for every account.
+   *
+   * Detached and self-skipping: refreshQuotas ignores any account whose
+   * reading is younger than quotaProbeMaxAge, so calling this often is cheap.
+   * An exhausted account answers 429 and costs nothing; a healthy one spends a
+   * single token.
+   */
+  const topUpQuota = (trigger: string) => {
+    const cfg = getConfig()
+    if (!cfg.quotaProbe) return
+    const targets = refreshAccountsList()
+      .map((a) => ({
+        source: a.source,
+        accessToken: a.credentials?.accessToken ?? "",
+      }))
+      .filter((a) => a.accessToken)
+    if (targets.length === 0) return
+
+    void refreshQuotas(targets, {
+      maxAgeSeconds: Math.floor(cfg.quotaProbeMaxAge / 1000),
+    })
+      .then((r) => {
+        if (r.probed > 0) log("quota_refreshed", { trigger, ...r })
+      })
+      .catch(() => {})
+  }
+
   if (accounts.length > 0) {
     const persistedSource = loadPersistedAccountSource()
     const defaultAccount =
@@ -352,7 +377,6 @@ const plugin: PluginWithOptions = async (
     // account, both happen without any user action and were previously visible
     // only in a log file nobody had enabled.
     const shownNotices = new Map<string, number>()
-    const NOTICE_COOLDOWN_MS = 10 * 60 * 1000
     setNoticeSink((notice) => {
       try {
         const advisory = noticeToToast(notice, {
@@ -364,7 +388,7 @@ const plugin: PluginWithOptions = async (
         // once, then stay quiet for a while.
         const key = noticeKey(notice)
         const last = shownNotices.get(key) ?? 0
-        if (Date.now() - last < NOTICE_COOLDOWN_MS) return
+        if (Date.now() - last < getConfig().noticeCooldown) return
         shownNotices.set(key, Date.now())
 
         void client.tui
@@ -451,16 +475,37 @@ const plugin: PluginWithOptions = async (
     // This prevents the "run `claude` to re-authenticate" message from
     // appearing mid-session when the token silently expires.
     let proactiveRefreshWarned = false
-    const syncTimer = setInterval(() => {
+
+    // Rescheduled after each tick rather than a fixed setInterval, so editing
+    // refreshCheckInterval takes effect without a restart -- the same promise
+    // the rest of the config makes. setInterval would capture the value once.
+    let syncTimer: ReturnType<typeof setTimeout>
+    const scheduleSync = () => {
+      syncTimer = setTimeout(() => {
+        runSyncTick()
+        scheduleSync()
+      }, getConfig().refreshCheckInterval)
+      syncTimer.unref?.()
+    }
+
+    const runSyncTick = () => {
+      // Quota ages the same way credentials do, and the account switcher cannot
+      // fetch on open -- its prompts getter is synchronous and OpenCode rejects
+      // a promise (verified: /provider/auth 500). Keeping the cache warm here is
+      // what makes the switcher current when it is opened.
+      topUpQuota("sync-tick")
       try {
         const account = getActiveAccount()
         log("proactive_refresh_check", {
           source: account?.source ?? null,
           expiresAt: account?.credentials?.expiresAt ?? null,
-          thresholdMs: PROACTIVE_REFRESH_THRESHOLD_MS,
+          thresholdMs: getConfig().refreshBeforeExpiry,
         })
 
-        const creds = refreshIfNeeded(undefined, PROACTIVE_REFRESH_THRESHOLD_MS)
+        const creds = refreshIfNeeded(
+          undefined,
+          getConfig().refreshBeforeExpiry,
+        )
         if (creds) {
           syncAuthJson(creds)
           if (proactiveRefreshWarned) {
@@ -470,7 +515,7 @@ const plugin: PluginWithOptions = async (
         } else {
           log("proactive_refresh_failed", { source: account?.source })
           // Only warn once per outage — otherwise this fires every
-          // SYNC_INTERVAL (5 min) for as long as refresh keeps failing.
+          // every check interval for as long as refresh keeps failing.
           if (!proactiveRefreshWarned) {
             proactiveRefreshWarned = true
             console.warn(
@@ -481,8 +526,9 @@ const plugin: PluginWithOptions = async (
       } catch {
         // Non-fatal
       }
-    }, SYNC_INTERVAL)
-    syncTimer.unref()
+    }
+
+    scheduleSync()
   } else {
     log("plugin_init_no_accounts", { reason: "no credentials found" })
     console.warn(
@@ -748,6 +794,9 @@ const plugin: PluginWithOptions = async (
             if (currentAccounts.length <= 1) return []
             // Read once per open, not once per row.
             const quotaCache = readQuotaCache()
+            // Values shown come from the cache; this refreshes it for the next
+            // open. The getter cannot await, so it cannot show its own result.
+            topUpQuota("switcher-open")
             return [
               {
                 type: "select" as const,

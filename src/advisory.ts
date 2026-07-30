@@ -83,15 +83,31 @@ export function bestAlternative(
  * carry (overage status, fallback percentage) describes why a limit behaves as
  * it does rather than anything the user can act on.
  */
+export type AdvisoryThresholds = {
+  warnAt?: number
+  weeklyWarnAt?: number
+  alternativeAt?: number
+  maxAgeSeconds?: number
+}
+
 export function buildAdvisory(
   accounts: AdvisoryAccount[],
   cache: QuotaCache,
   activeSource: string | null,
   now: number = Math.floor(Date.now() / 1000),
+  thresholds: AdvisoryThresholds = {},
 ): Advisory | undefined {
+  const warnAt = thresholds.warnAt ?? WARN_AT
+  const weeklyWarnAt = thresholds.weeklyWarnAt ?? WEEKLY_WARN_AT
+  const alternativeAt = thresholds.alternativeAt ?? ALTERNATIVE_AT
   if (!activeSource) return undefined
 
-  const active = quotaForAccount(activeSource, cache, now)
+  const active = quotaForAccount(
+    activeSource,
+    cache,
+    now,
+    thresholds.maxAgeSeconds,
+  )
   if (!active) return undefined
 
   const activeLabel = shortenLabel(
@@ -102,7 +118,7 @@ export function buildAdvisory(
   const week = active.sevenDay
 
   // Exhausted or nearly so: the next request may simply fail.
-  if (five && five.utilization >= WARN_AT) {
+  if (five && five.utilization >= warnAt) {
     const pct = Math.round(Math.min(five.utilization, 1) * 100)
     const resets =
       five.resetsAt && five.resetsAt > now
@@ -111,7 +127,7 @@ export function buildAdvisory(
 
     const alt = bestAlternative(accounts, cache, activeSource, now)
     const suggestion =
-      alt && alt.utilization <= ALTERNATIVE_AT
+      alt && alt.utilization <= alternativeAt
         ? ` ${shortenLabel(alt.account.label)} is at ${Math.round(alt.utilization * 100)}%.`
         : ""
 
@@ -124,7 +140,7 @@ export function buildAdvisory(
   }
 
   // Weekly burn is invisible in the 5h number until it bites.
-  if (week && week.utilization >= WEEKLY_WARN_AT) {
+  if (week && week.utilization >= weeklyWarnAt) {
     const pct = Math.round(Math.min(week.utilization, 1) * 100)
     const resets =
       week.resetsAt && week.resetsAt > now

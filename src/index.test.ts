@@ -764,13 +764,13 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
   })
 
   it("system transform does not inject when system already contains prefix", async () => {
-    const originalSetInterval = globalThis.setInterval
+    const originalSetTimeout = globalThis.setTimeout
     const originalHome = process.env.HOME
     const tempHome = await mkdtemp(join(tmpdir(), "opencode-claude-auth-home-"))
     process.env.HOME = tempHome
-    globalThis.setInterval = (() => ({
+    globalThis.setTimeout = (() => ({
       unref() {},
-    })) as unknown as typeof setInterval
+    })) as unknown as typeof setTimeout
 
     try {
       const plugin = await helpers.default({} as never)
@@ -792,7 +792,7 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
 
       assert.deepEqual(output.system, [prefixed])
     } finally {
-      globalThis.setInterval = originalSetInterval
+      globalThis.setTimeout = originalSetTimeout
       if (typeof originalHome === "string") {
         process.env.HOME = originalHome
       } else {
@@ -802,13 +802,13 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
   })
 
   it("system transform injects prefix at most once when already present", async () => {
-    const originalSetInterval = globalThis.setInterval
+    const originalSetTimeout = globalThis.setTimeout
     const originalHome = process.env.HOME
     const tempHome = await mkdtemp(join(tmpdir(), "opencode-claude-auth-home-"))
     process.env.HOME = tempHome
-    globalThis.setInterval = (() => ({
+    globalThis.setTimeout = (() => ({
       unref() {},
-    })) as unknown as typeof setInterval
+    })) as unknown as typeof setTimeout
 
     try {
       const plugin = await helpers.default({} as never)
@@ -831,7 +831,7 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
         .match(/You are Claude Code, Anthropic's official CLI for Claude\./g)
       assert.equal(occurrences?.length, 1)
     } finally {
-      globalThis.setInterval = originalSetInterval
+      globalThis.setTimeout = originalSetTimeout
       if (typeof originalHome === "string") {
         process.env.HOME = originalHome
       } else {
@@ -841,7 +841,7 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
   })
 
   it("plugin calls unref on the sync interval timer", async () => {
-    const originalSetInterval = globalThis.setInterval
+    const originalSetTimeout = globalThis.setTimeout
     const originalHome = process.env.HOME
     const tempHome = await mkdtemp(join(tmpdir(), "opencode-claude-auth-home-"))
     process.env.HOME = tempHome
@@ -852,16 +852,13 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
         unrefCalled = true
       },
     }
-    globalThis.setInterval = (() => fakeTimer) as unknown as typeof setInterval
+    globalThis.setTimeout = (() => fakeTimer) as unknown as typeof setTimeout
 
     try {
       await helpers.default({} as never)
-      assert.ok(
-        unrefCalled,
-        "Expected .unref() to be called on the interval timer",
-      )
+      assert.ok(unrefCalled, "Expected .unref() to be called on the sync timer")
     } finally {
-      globalThis.setInterval = originalSetInterval
+      globalThis.setTimeout = originalSetTimeout
       if (typeof originalHome === "string") {
         process.env.HOME = originalHome
       } else {
@@ -871,7 +868,7 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
   })
 
   it("proactive refresh timer targets the ACTIVE account after a switch, not accounts[0]", async () => {
-    const originalSetInterval = globalThis.setInterval
+    const originalSetTimeout = globalThis.setTimeout
     const originalHome = process.env.HOME
     const originalDebug = process.env.CLAUDE_AUTH_DEBUG
     const tempHome = await mkdtemp(join(tmpdir(), "opencode-claude-auth-home-"))
@@ -883,10 +880,10 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
     process.env.CLAUDE_AUTH_DEBUG = debugLogPath
 
     let tickCallback: (() => void) | undefined
-    globalThis.setInterval = ((cb: () => void) => {
+    globalThis.setTimeout = ((cb: () => void) => {
       tickCallback = cb
       return { unref() {} }
-    }) as unknown as typeof setInterval
+    }) as unknown as typeof setTimeout
 
     try {
       const { helpersModule } = await loadHelpersWithMultiAccountKeychain({
@@ -905,7 +902,7 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
       const plugin = await helpersModule.default({} as never)
       assert.ok(
         tickCallback,
-        "Expected setInterval to capture the tick callback",
+        "Expected the scheduler to capture the tick callback",
       )
 
       const typedPlugin = plugin as {
@@ -947,7 +944,7 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
           `Log: ${logs}`,
       )
     } finally {
-      globalThis.setInterval = originalSetInterval
+      globalThis.setTimeout = originalSetTimeout
       if (typeof originalHome === "string") {
         process.env.HOME = originalHome
       } else {
@@ -962,17 +959,17 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
   })
 
   it("proactive refresh timer warns at most once per outage (no spam on repeated failures)", async () => {
-    const originalSetInterval = globalThis.setInterval
+    const originalSetTimeout = globalThis.setTimeout
     const originalHome = process.env.HOME
     const originalWarn = console.warn
     const tempHome = await mkdtemp(join(tmpdir(), "opencode-claude-auth-home-"))
     process.env.HOME = tempHome
 
     let tickCallback: (() => void) | undefined
-    globalThis.setInterval = ((cb: () => void) => {
+    globalThis.setTimeout = ((cb: () => void) => {
       tickCallback = cb
       return { unref() {} }
-    }) as unknown as typeof setInterval
+    }) as unknown as typeof setTimeout
 
     const warnMessages: string[] = []
     console.warn = ((...args: unknown[]) => {
@@ -1019,7 +1016,7 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
         `Expected exactly 1 warning across 3 failed ticks (latched), got ${proactiveWarnings.length}`,
       )
     } finally {
-      globalThis.setInterval = originalSetInterval
+      globalThis.setTimeout = originalSetTimeout
       console.warn = originalWarn
       if (typeof originalHome === "string") {
         process.env.HOME = originalHome
@@ -1031,15 +1028,15 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
 
   it("auth fetch forwards original input URL unchanged", async () => {
     const originalNow = Date.now
-    const originalSetInterval = globalThis.setInterval
+    const originalSetTimeout = globalThis.setTimeout
     const originalHome = process.env.HOME
     const originalFetch = globalThis.fetch
     const tempHome = await mkdtemp(join(tmpdir(), "opencode-claude-auth-home-"))
     process.env.HOME = tempHome
     Date.now = () => 1_700_000_000_000
-    globalThis.setInterval = (() => ({
+    globalThis.setTimeout = (() => ({
       unref() {},
-    })) as unknown as typeof setInterval
+    })) as unknown as typeof setTimeout
 
     let forwardedInput: RequestInfo | URL | undefined
 
@@ -1074,7 +1071,7 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
       assert.equal(forwardedInput, `${originalInput}?beta=true`)
     } finally {
       Date.now = originalNow
-      globalThis.setInterval = originalSetInterval
+      globalThis.setTimeout = originalSetTimeout
       globalThis.fetch = originalFetch
       if (typeof originalHome === "string") {
         process.env.HOME = originalHome
@@ -1086,15 +1083,15 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
 
   it("auth fetch reloads the source and retries once with a rotated token", async () => {
     const originalNow = Date.now
-    const originalSetInterval = globalThis.setInterval
+    const originalSetTimeout = globalThis.setTimeout
     const originalHome = process.env.HOME
     const originalFetch = globalThis.fetch
     const tempHome = await mkdtemp(join(tmpdir(), "opencode-claude-auth-home-"))
     process.env.HOME = tempHome
     Date.now = () => 1_700_000_000_000
-    globalThis.setInterval = (() => ({
+    globalThis.setTimeout = (() => ({
       unref() {},
-    })) as unknown as typeof setInterval
+    })) as unknown as typeof setTimeout
 
     const authorizationHeaders: string[] = []
 
@@ -1144,7 +1141,7 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
       ])
     } finally {
       Date.now = originalNow
-      globalThis.setInterval = originalSetInterval
+      globalThis.setTimeout = originalSetTimeout
       globalThis.fetch = originalFetch
       if (typeof originalHome === "string") {
         process.env.HOME = originalHome
@@ -1156,15 +1153,15 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
 
   it("auth fetch does not retry a 401 when the source token is unchanged", async () => {
     const originalNow = Date.now
-    const originalSetInterval = globalThis.setInterval
+    const originalSetTimeout = globalThis.setTimeout
     const originalHome = process.env.HOME
     const originalFetch = globalThis.fetch
     const tempHome = await mkdtemp(join(tmpdir(), "opencode-claude-auth-home-"))
     process.env.HOME = tempHome
     Date.now = () => 1_700_000_000_000
-    globalThis.setInterval = (() => ({
+    globalThis.setTimeout = (() => ({
       unref() {},
-    })) as unknown as typeof setInterval
+    })) as unknown as typeof setTimeout
 
     let requestCount = 0
     const errorBody = '{"name":"mcp_UnchangedToken"}'
@@ -1208,7 +1205,7 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
       assert.equal(requestCount, 1)
     } finally {
       Date.now = originalNow
-      globalThis.setInterval = originalSetInterval
+      globalThis.setTimeout = originalSetTimeout
       globalThis.fetch = originalFetch
       if (typeof originalHome === "string") {
         process.env.HOME = originalHome
@@ -1220,15 +1217,15 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
 
   it("auth fetch preserves the original 401 when credential reload throws", async () => {
     const originalNow = Date.now
-    const originalSetInterval = globalThis.setInterval
+    const originalSetTimeout = globalThis.setTimeout
     const originalHome = process.env.HOME
     const originalFetch = globalThis.fetch
     const tempHome = await mkdtemp(join(tmpdir(), "opencode-claude-auth-home-"))
     process.env.HOME = tempHome
     Date.now = () => 1_700_000_000_000
-    globalThis.setInterval = (() => ({
+    globalThis.setTimeout = (() => ({
       unref() {},
-    })) as unknown as typeof setInterval
+    })) as unknown as typeof setTimeout
 
     let requestCount = 0
     const errorBody = '{"name":"mcp_ReloadFailure"}'
@@ -1279,7 +1276,7 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
       assert.equal(requestCount, 1)
     } finally {
       Date.now = originalNow
-      globalThis.setInterval = originalSetInterval
+      globalThis.setTimeout = originalSetTimeout
       globalThis.fetch = originalFetch
       if (typeof originalHome === "string") {
         process.env.HOME = originalHome
@@ -1291,16 +1288,16 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
 
   it("auth fetch returns quota errors without writing over the terminal UI", async () => {
     const originalNow = Date.now
-    const originalSetInterval = globalThis.setInterval
+    const originalSetTimeout = globalThis.setTimeout
     const originalHome = process.env.HOME
     const originalFetch = globalThis.fetch
     const originalWarn = console.warn
     const tempHome = await mkdtemp(join(tmpdir(), "opencode-claude-auth-home-"))
     process.env.HOME = tempHome
     Date.now = () => 1_700_000_000_000
-    globalThis.setInterval = (() => ({
+    globalThis.setTimeout = (() => ({
       unref() {},
-    })) as unknown as typeof setInterval
+    })) as unknown as typeof setTimeout
 
     const errorBody = JSON.stringify({
       type: "error",
@@ -1363,7 +1360,7 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
       assert.deepEqual(warnings, [])
     } finally {
       Date.now = originalNow
-      globalThis.setInterval = originalSetInterval
+      globalThis.setTimeout = originalSetTimeout
       globalThis.fetch = originalFetch
       console.warn = originalWarn
       if (typeof originalHome === "string") {

@@ -32,6 +32,51 @@ import { parseKeep, parseLevel, parseSize, type LogLevel } from "./logger.ts"
 export const CONFIG_FILENAME = "claude-auth.jsonc"
 export const CONFIG_FILENAME_JSON = "claude-auth.json"
 
+/**
+ * Parse a duration: bare milliseconds, or a suffixed value (30s, 5m, 2h, 1d).
+ *
+ * Returns the fallback for anything unparseable or non-positive -- a zero
+ * interval would mean a timer firing continuously, which is worse than ignoring
+ * a typo.
+ */
+export function parseDuration(
+  input: string | number | undefined,
+  fallback: number,
+): number {
+  if (input === undefined || input === null || input === "") return fallback
+  if (typeof input === "number") {
+    return Number.isFinite(input) && input > 0 ? Math.floor(input) : fallback
+  }
+  const m = /^\s*([0-9]*\.?[0-9]+)\s*(ms|s|m|h|d)?\s*$/i.exec(input)
+  if (!m) return fallback
+  const n = Number.parseFloat(m[1])
+  if (!Number.isFinite(n) || n <= 0) return fallback
+  const unit = (m[2] ?? "ms").toLowerCase()
+  const mult: Record<string, number> = {
+    ms: 1,
+    s: 1000,
+    m: 60_000,
+    h: 3_600_000,
+    d: 86_400_000,
+  }
+  return Math.floor(n * (mult[unit] ?? 1))
+}
+
+/** Parse a 0..1 ratio, also accepting a percentage like "90%" or 90. */
+export function parseRatio(
+  input: string | number | undefined,
+  fallback: number,
+): number {
+  if (input === undefined || input === null || input === "") return fallback
+  const raw =
+    typeof input === "number"
+      ? input
+      : Number.parseFloat(String(input).replace("%", ""))
+  if (!Number.isFinite(raw) || raw <= 0) return fallback
+  const asRatio = raw > 1 ? raw / 100 : raw
+  return asRatio > 0 && asRatio <= 1 ? asRatio : fallback
+}
+
 export type ClaudeAuthConfig = {
   /** false disables logging; true uses the default path; a string is a path. */
   debug: boolean | string
@@ -45,6 +90,25 @@ export type ClaudeAuthConfig = {
   /** Also toast on a successful refresh (failures always toast). */
   toastOnRefresh: boolean
   accountLabel: AccountLabelPlacement
+
+  /** How often the background timer checks whether a refresh is due. */
+  refreshCheckInterval: number
+  /** How long before expiry a token is refreshed. */
+  refreshBeforeExpiry: number
+  /** How long the same toast is suppressed after being shown once. */
+  noticeCooldown: number
+  /** How long a quota reading is reused before an account is re-probed. */
+  quotaProbeMaxAge: number
+  /** Beyond this age a cached quota reading is ignored entirely. */
+  quotaMaxAge: number
+  /** 5h utilisation at or above which the active account is flagged. */
+  quotaWarnAt: number
+  /** Weekly utilisation at or above which the account is flagged. */
+  quotaWeeklyWarnAt: number
+  /** An alternative account is only suggested at or below this utilisation. */
+  quotaAlternativeAt: number
+  /** How often the config file itself is re-checked for edits. */
+  configReloadInterval: number
 }
 
 export const DEFAULT_CONFIG: ClaudeAuthConfig = {
@@ -56,6 +120,16 @@ export const DEFAULT_CONFIG: ClaudeAuthConfig = {
   quotaProbe: false,
   toastOnRefresh: false,
   accountLabel: DEFAULT_PLACEMENT,
+
+  refreshCheckInterval: 5 * 60_000,
+  refreshBeforeExpiry: 60 * 60_000,
+  noticeCooldown: 10 * 60_000,
+  quotaProbeMaxAge: 10 * 60_000,
+  quotaMaxAge: 12 * 60 * 60_000,
+  quotaWarnAt: 0.9,
+  quotaWeeklyWarnAt: 0.85,
+  quotaAlternativeAt: 0.7,
+  configReloadInterval: 3000,
 }
 
 /**
@@ -163,6 +237,36 @@ export function sanitize(raw: unknown): Partial<ClaudeAuthConfig> {
 
   if (isAccountLabelPlacement(r.accountLabel)) out.accountLabel = r.accountLabel
 
+  const durations: Array<[keyof ClaudeAuthConfig, unknown]> = [
+    ["refreshCheckInterval", r.refreshCheckInterval],
+    ["refreshBeforeExpiry", r.refreshBeforeExpiry],
+    ["noticeCooldown", r.noticeCooldown],
+    ["quotaProbeMaxAge", r.quotaProbeMaxAge],
+    ["quotaMaxAge", r.quotaMaxAge],
+    ["configReloadInterval", r.configReloadInterval],
+  ]
+  for (const [key, value] of durations) {
+    if (value === undefined) continue
+    const parsed = parseDuration(
+      value as string | number,
+      DEFAULT_CONFIG[key] as number,
+    )
+    ;(out as Record<string, unknown>)[key] = parsed
+  }
+
+  const ratios: Array<[keyof ClaudeAuthConfig, unknown]> = [
+    ["quotaWarnAt", r.quotaWarnAt],
+    ["quotaWeeklyWarnAt", r.quotaWeeklyWarnAt],
+    ["quotaAlternativeAt", r.quotaAlternativeAt],
+  ]
+  for (const [key, value] of ratios) {
+    if (value === undefined) continue
+    ;(out as Record<string, unknown>)[key] = parseRatio(
+      value as string | number,
+      DEFAULT_CONFIG[key] as number,
+    )
+  }
+
   return out
 }
 
@@ -247,7 +351,7 @@ export function resolveConfig(
  * cheap. This is the reason for a file over environment variables: editing it
  * takes effect without a new shell or an OpenCode restart.
  */
-const RECHECK_MS = 3000
+const RECHECK_FALLBACK_MS = 3000
 
 let cached: ClaudeAuthConfig | null = null
 let cachedAt = 0
@@ -273,7 +377,8 @@ export function getConfig(
   inline: unknown = cachedInline,
 ): ClaudeAuthConfig {
   const now = Date.now()
-  if (cached && now - cachedAt < RECHECK_MS) return cached
+  const recheck = cached?.configReloadInterval ?? RECHECK_FALLBACK_MS
+  if (cached && now - cachedAt < recheck) return cached
 
   const paths = candidatePaths(projectDir)
   const stamp = stampFor(paths)

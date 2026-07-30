@@ -1004,3 +1004,35 @@ describe("buildAccountLabels — comment precedence", () => {
     assert.equal(labels[1], "Claude Team 2: svc-2")
   })
 })
+
+describe("config dir suffix — trailing slash", () => {
+  it("hashes the path exactly as CLAUDE_CONFIG_DIR was written", () => {
+    // Verified against the live Keychain: the aliases set the value WITH a
+    // trailing slash, so that is what Claude Code hashed.
+    const withSlash = "/Users/you/.claude-team-1/"
+    const without = "/Users/you/.claude-team-1"
+    assert.equal(keychainSuffixForDir(withSlash), "780bcd9b")
+    assert.notEqual(keychainSuffixForDir(without), "780bcd9b")
+  })
+
+  it("the two forms genuinely differ, which is why one form alone fails", () => {
+    for (const n of [1, 2, 3]) {
+      const p = `/Users/you/.claude-team-${n}`
+      assert.notEqual(keychainSuffixForDir(p), keychainSuffixForDir(`${p}/`))
+    }
+  })
+
+  it("reproduces every live suffix from the slashed form", () => {
+    const expected: Record<number, string> = {
+      1: "780bcd9b",
+      2: "04bd82dd",
+      3: "e534bce6",
+    }
+    for (const [n, suffix] of Object.entries(expected)) {
+      assert.equal(
+        keychainSuffixForDir(`/Users/you/.claude-team-${n}/`),
+        suffix,
+      )
+    }
+  })
+})

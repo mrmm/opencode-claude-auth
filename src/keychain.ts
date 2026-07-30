@@ -268,9 +268,18 @@ function buildSuffixToDirCache(needed: Set<string>): Map<string, string> {
 
   const cache = suffixToDirCache ?? new Map<string, string>()
 
+  // The suffix hashes CLAUDE_CONFIG_DIR exactly as it was set, so a directory
+  // reconstructed from a listing has to be tried both with and without a
+  // trailing slash. Aliases are commonly written with one
+  // (CLAUDE_CONFIG_DIR=~/.claude-work/), and hashing only the join()ed form
+  // silently matched nothing: every suffixed account resolved to a null config
+  // directory, which disabled the CLI refresh fallback for all of them.
   const tryDir = (dir: string) => {
-    const suffix = keychainSuffixForDir(dir)
-    if (needed.has(suffix) && !cache.has(suffix)) cache.set(suffix, dir)
+    const bare = dir.endsWith("/") ? dir.slice(0, -1) : dir
+    for (const candidate of [bare, `${bare}/`]) {
+      const suffix = keychainSuffixForDir(candidate)
+      if (needed.has(suffix) && !cache.has(suffix)) cache.set(suffix, bare)
+    }
   }
 
   if (process.env.CLAUDE_CONFIG_DIR) {

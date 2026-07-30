@@ -127,6 +127,21 @@ function buildAuthorizeResult(account: Account) {
 //
 // keychain.ts is copied too, but callers overwrite it with a stub afterwards, so
 // the stub still wins.
+/**
+ * These tests stub globalThis.fetch and count calls, so any ambient plugin
+ * setting that causes init-time network activity corrupts them. Someone with
+ * CLAUDE_AUTH_QUOTA_PROBE=1 exported -- a reasonable thing to have -- saw four
+ * unrelated failures. Tests own their environment; opt-in behaviour is enabled
+ * explicitly by the tests that want it.
+ */
+for (const key of [
+  "CLAUDE_AUTH_QUOTA_PROBE",
+  "CLAUDE_AUTH_DEBUG_EVENTS",
+  "CLAUDE_AUTH_ACCOUNT_LABEL",
+]) {
+  delete process.env[key]
+}
+
 const SOURCE_FILES = readdirSync(new URL(".", import.meta.url)).filter(
   (f) => f.endsWith(".ts") && !f.endsWith(".test.ts"),
 )

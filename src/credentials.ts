@@ -186,57 +186,153 @@ export function parseOAuthResponse(
   }
 }
 
+/**
+ * Interpreters that can perform the token POST synchronously.
+ *
+ * `process.execPath` cannot be assumed to be node: inside OpenCode it is the
+ * opencode binary, which does not accept `-e <script>`. Feeding it one produced
+ * a failed refresh on every attempt -- 2,873 of them in one log -- after which
+ * the plugin silently fell back to a different account.
+ *
+ * curl is tried first because it is the stable interface here and needs no
+ * JavaScript-in-argv quoting; a node-like runtime is the fallback for
+ * environments without it. In both cases the refresh token goes in over stdin,
+ * never in argv, where it would be visible in the process list.
+ */
+type PostForm = (url: string, body: string) => string
+
+function looksLikeNodeRuntime(execPath: string): boolean {
+  const base = (execPath ?? "").split("/").pop() ?? ""
+  return /^(node|bun|deno)(\.exe)?$/i.test(base)
+}
+
+/** Ordered transports; the first that exists is used. */
+export function resolvePostTransports(
+  execPath: string = process.execPath,
+  lookup: (bin: string) => string | null = which,
+): Array<{ name: string; run: PostForm }> {
+  const out: Array<{ name: string; run: PostForm }> = []
+
+  const curl = lookup("curl")
+  if (curl) {
+    out.push({
+      name: "curl",
+      run: (url, body) =>
+        execFileSync(
+          curl,
+          [
+            "-s",
+            "-S",
+            "--fail",
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/x-www-form-urlencoded",
+            "--data-binary",
+            "@-",
+            url,
+          ],
+          {
+            input: body,
+            timeout: 15_000,
+            encoding: "utf-8",
+            stdio: ["pipe", "pipe", "pipe"],
+          },
+        ),
+    })
+  }
+
+  const runtime = looksLikeNodeRuntime(execPath)
+    ? execPath
+    : (lookup("node") ?? lookup("bun"))
+  if (runtime) {
+    const script = `
+      let input = '';
+      process.stdin.resume();
+      process.stdin.on('data', c => input += c);
+      process.stdin.on('end', () => {
+        fetch(process.env.OAUTH_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: input
+        })
+        .then(r => { if (!r.ok) throw new Error(String(r.status)); return r.text(); })
+        .then(t => process.stdout.write(t))
+        .catch(e => { process.stderr.write(String(e)); process.exit(1); });
+      });
+    `
+    out.push({
+      name: looksLikeNodeRuntime(execPath) ? "execPath" : "path-runtime",
+      run: (url, body) =>
+        execFileSync(runtime, ["-e", script], {
+          input: body,
+          timeout: 15_000,
+          encoding: "utf-8",
+          stdio: ["pipe", "pipe", "pipe"],
+          env: { ...process.env, OAUTH_URL: url },
+        }),
+    })
+  }
+
+  return out
+}
+
+function which(bin: string): string | null {
+  try {
+    const p = execFileSync("/usr/bin/env", ["sh", "-c", `command -v ${bin}`], {
+      encoding: "utf-8",
+      timeout: 3000,
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim()
+    return p || null
+  } catch {
+    return null
+  }
+}
+
 export function refreshViaOAuth(
   refreshToken: string,
 ): ClaudeCredentials | null {
-  const script = `
-    process.stdin.resume();
-    let input = '';
-    process.stdin.on('data', c => input += c);
-    process.stdin.on('end', () => {
-      const body = new URLSearchParams({
-        grant_type: 'refresh_token',
-        client_id: '${OAUTH_CLIENT_ID}',
-        refresh_token: input.trim()
-      });
-      fetch('${OAUTH_TOKEN_URL}', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: body.toString()
-      })
-      .then(r => { if (!r.ok) throw new Error(String(r.status)); return r.json(); })
-      .then(d => { process.stdout.write(JSON.stringify(d)); })
-      .catch(e => { process.stdout.write(JSON.stringify({ error: String(e) })); process.exit(1); });
-    });
-  `
+  const body = new URLSearchParams({
+    grant_type: "refresh_token",
+    client_id: OAUTH_CLIENT_ID,
+    refresh_token: refreshToken.trim(),
+  }).toString()
 
-  try {
-    log("refresh_started", { source: "oauth" })
-    const result = execFileSync(process.execPath, ["-e", script], {
-      input: refreshToken,
-      timeout: 15_000,
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "ignore"],
-    })
-
-    const creds = parseOAuthResponse(result, refreshToken)
-    if (!creds) {
-      log("refresh_failed", {
-        source: "oauth",
-        error: "no access_token in response",
-      })
-      return null
-    }
-
-    log("refresh_success", { source: "oauth" })
-    return creds
-  } catch (err) {
+  const transports = resolvePostTransports()
+  if (transports.length === 0) {
     log("refresh_failed", {
       source: "oauth",
-      error: err instanceof Error ? err.message : String(err),
+      error: "no usable HTTP transport",
     })
     return null
   }
+
+  for (const transport of transports) {
+    try {
+      log("refresh_started", { source: "oauth", transport: transport.name })
+      const result = transport.run(OAUTH_TOKEN_URL, body)
+      const creds = parseOAuthResponse(result, refreshToken)
+      if (!creds) {
+        log("refresh_failed", {
+          source: "oauth",
+          transport: transport.name,
+          error: "no access_token in response",
+        })
+        continue
+      }
+      log("refresh_success", { source: "oauth", transport: transport.name })
+      return creds
+    } catch (err) {
+      log("refresh_failed", {
+        source: "oauth",
+        transport: transport.name,
+        error: err instanceof Error ? err.message.slice(0, 200) : String(err),
+      })
+    }
+  }
+
+  return null
 }
 
 function refreshViaCli(configDir?: string, requireConfigDir = false): boolean {

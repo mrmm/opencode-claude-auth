@@ -1,6 +1,10 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
-import { refreshViaOAuth, parseOAuthResponse } from "./credentials.ts"
+import {
+  parseOAuthResponse,
+  refreshViaOAuth,
+  resolvePostTransports,
+} from "./credentials.ts"
 import {
   chmodSync,
   mkdirSync,
@@ -1117,5 +1121,66 @@ describe("parseOAuthResponse", () => {
 
   it("returns null for empty string", () => {
     assert.equal(parseOAuthResponse("", currentRefresh, now), null)
+  })
+})
+
+describe("OAuth transport selection", () => {
+  const fakeWhich = (present: string[]) => (b: string) =>
+    present.includes(b) ? `/usr/bin/${b}` : null
+
+  it("prefers curl, which needs no JS-in-argv quoting", () => {
+    const t = resolvePostTransports(
+      "/usr/bin/node",
+      fakeWhich(["curl", "node"]),
+    )
+    assert.equal(t[0].name, "curl")
+  })
+
+  it("does not treat the opencode binary as a JS runtime", () => {
+    // The actual failure: execFileSync(process.execPath, ["-e", script]) ran
+    // opencode.exe -e <node script> and failed every single time.
+    const opencode =
+      "/opt/homebrew/Cellar/opencode/1.18.5/libexec/lib/node_modules/opencode-ai/bin/opencode.exe"
+    const t = resolvePostTransports(opencode, fakeWhich(["curl"]))
+    assert.deepEqual(
+      t.map((x) => x.name),
+      ["curl"],
+    )
+  })
+
+  it("falls back to a runtime found on PATH when execPath is not one", () => {
+    const t = resolvePostTransports(
+      "/somewhere/opencode.exe",
+      fakeWhich(["node"]),
+    )
+    assert.deepEqual(
+      t.map((x) => x.name),
+      ["path-runtime"],
+    )
+  })
+
+  it("uses execPath directly when it really is a JS runtime", () => {
+    for (const p of ["/usr/bin/node", "/opt/bun", "/x/node.exe", "/y/deno"]) {
+      const t = resolvePostTransports(p, fakeWhich([]))
+      assert.equal(t[0]?.name, "execPath", p)
+    }
+  })
+
+  it("reports no transport rather than pretending, when nothing is available", () => {
+    assert.deepEqual(
+      resolvePostTransports("/x/opencode.exe", fakeWhich([])),
+      [],
+    )
+  })
+
+  it("orders curl ahead of the runtime when both exist", () => {
+    const t = resolvePostTransports(
+      "/usr/bin/node",
+      fakeWhich(["curl", "node"]),
+    )
+    assert.deepEqual(
+      t.map((x) => x.name),
+      ["curl", "execPath"],
+    )
   })
 })

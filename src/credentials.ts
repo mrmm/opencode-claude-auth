@@ -18,6 +18,7 @@ import {
 } from "./keychain.ts"
 import { resetExcludedBetas } from "./betas.ts"
 import { emitNotice } from "./notify.ts"
+import { acquireRefreshLock } from "./refresh-lock.ts"
 import { log } from "./logger.ts"
 
 export type { ClaudeAccount } from "./keychain.ts"
@@ -390,6 +391,43 @@ function refreshViaCli(configDir?: string, requireConfigDir = false): boolean {
  * of threshold, so this always operates on the currently active account
  * unless one is explicitly passed in.
  */
+/**
+ * Wait briefly for whichever process holds the lock to publish a token.
+ *
+ * Polls the credential source rather than the lock: what matters is a usable
+ * token appearing, not the lock being released. Gives up quickly -- a caller
+ * that waits too long is worse than one that tries its own refresh.
+ */
+function waitForForeignRefresh(
+  target: ClaudeAccount,
+  budgetMs = 5000,
+  stepMs = 250,
+): ClaudeCredentials | null {
+  const deadline = Date.now() + budgetMs
+  while (Date.now() < deadline) {
+    try {
+      const fresh = refreshAccount(target.source, target.configDir)
+      if (fresh && fresh.expiresAt > Date.now() + 60_000) {
+        target.credentials = fresh
+        log("refresh_adopted_foreign", {
+          source: target.source,
+          expiresAt: fresh.expiresAt,
+        })
+        return fresh
+      }
+    } catch {
+      // keep waiting
+    }
+    // Synchronous sleep: this whole path is sync by contract.
+    const until = Date.now() + stepMs
+    while (Date.now() < until) {
+      /* spin */
+    }
+  }
+  log("refresh_wait_timeout", { source: target.source, budgetMs })
+  return null
+}
+
 export function refreshIfNeeded(
   account?: ClaudeAccount,
   thresholdMs = 60_000,
@@ -419,7 +457,45 @@ export function refreshIfNeeded(
   })
 
   if (creds.refreshToken) {
+    // Refreshing rotates the token and revokes access tokens already issued for
+    // this account, so two processes doing it concurrently revoke each other.
+    // Take a per-account lock; a process that cannot get it waits for the holder
+    // rather than issuing a competing refresh.
+    const release = acquireRefreshLock(target.source)
+    if (!release) {
+      log("refresh_deferred", {
+        source: target.source,
+        reason: "another process is refreshing this account",
+      })
+      const fromOther = waitForForeignRefresh(target)
+      if (fromOther) return fromOther
+    }
+
+    try {
+      // The lock holder has very likely just written a good token. Re-read
+      // before spending one: the in-memory copy may already be superseded, and
+      // refreshing with a superseded token is what revokes everyone else.
+      const onDisk = refreshAccount(target.source, target.configDir)
+      if (onDisk && onDisk.expiresAt > Date.now() + thresholdMs) {
+        target.credentials = onDisk
+        log("refresh_not_needed", {
+          source: target.source,
+          reason: "source already holds a fresh token",
+          expiresAt: onDisk.expiresAt,
+        })
+        release?.()
+        return onDisk
+      }
+      if (onDisk?.refreshToken && onDisk.refreshToken !== creds.refreshToken) {
+        log("refresh_token_rotated_elsewhere", { source: target.source })
+        creds.refreshToken = onDisk.refreshToken
+      }
+    } catch {
+      // Fall through to the refresh below.
+    }
+
     const oauthCreds = refreshViaOAuth(creds.refreshToken)
+    release?.()
     if (oauthCreds && oauthCreds.expiresAt > Date.now() + 60_000) {
       emitNotice({
         kind: "refresh-succeeded",

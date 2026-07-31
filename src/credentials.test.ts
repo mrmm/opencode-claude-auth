@@ -698,10 +698,14 @@ describe("credential caching", () => {
       const result = credentialsModule.refreshIfNeeded()
 
       assert.equal(result?.accessToken, "fresh-in-memory")
-      assert.equal(
-        keychainModule.__getReadCount(),
-        readsBefore,
-        "valid in-memory fallback credentials must not trigger a keychain read",
+      // The refresh path now re-reads the source once before spending a
+      // refresh, because refreshing rotates the token and revokes access tokens
+      // held by other processes. One keychain read is far cheaper than that, so
+      // the budget is "at most one", not "none" -- what still matters is that
+      // borrowing an in-memory account does not walk the keychain per account.
+      assert.ok(
+        keychainModule.__getReadCount() <= readsBefore + 1,
+        `in-memory fallback must not walk the keychain: ${readsBefore} -> ${keychainModule.__getReadCount()}`,
       )
     } finally {
       Date.now = originalNow

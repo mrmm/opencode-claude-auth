@@ -519,7 +519,7 @@ const plugin: PluginWithOptions = async (
           if (!proactiveRefreshWarned) {
             proactiveRefreshWarned = true
             console.warn(
-              "opencode-claude-auth: Proactive token refresh failed. Run `claude` to re-authenticate.",
+              `opencode-claude-auth: Proactive token refresh failed for ${account?.label ?? account?.source ?? "the active account"}. Run \`claude\` to re-authenticate.`,
             )
           }
         }

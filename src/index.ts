@@ -671,6 +671,30 @@ const plugin: PluginWithOptions = async (
               try {
                 refreshed = reloadCredentialsFromSource()
               } catch {}
+
+              // The source had nothing newer, yet the server rejected this
+              // token: the stored credential is itself stale, and reloading it
+              // again will never help. This is the shape of a session that sat
+              // idle -- overnight, or awaiting a permission prompt -- while its
+              // access token was rotated or revoked out from under it. A 401 is
+              // proof enough to spend a refresh, which is safe now that
+              // refreshing takes a per-account lock and re-reads first.
+              if (!refreshed || refreshed.accessToken === latest.accessToken) {
+                try {
+                  log("stale_token_forcing_refresh", {
+                    reason: "401 with no newer credentials at the source",
+                    modelId,
+                  })
+                  // A threshold of Infinity means "treat it as expired now".
+                  refreshed =
+                    refreshIfNeeded(undefined, Number.POSITIVE_INFINITY) ?? null
+                } catch (err) {
+                  log("stale_token_refresh_failed", {
+                    error: err instanceof Error ? err.message : String(err),
+                  })
+                }
+              }
+
               if (refreshed && refreshed.accessToken !== latest.accessToken) {
                 const retryHeaders = buildRequestHeaders(
                   input,

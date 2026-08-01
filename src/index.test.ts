@@ -1151,6 +1151,71 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
     }
   })
 
+  it("a 401 with nothing newer at the source attempts a refresh, not surrender", async () => {
+    // The overnight shape: a session sits idle -- awaiting a permission prompt,
+    // say -- while its access token is rotated or revoked. In the morning the
+    // request 401s, and reloading the source returns the same dead token, so
+    // there is nothing to retry with. Previously the plugin gave up there and
+    // surfaced "OAuth access token has been revoked". A 401 is proof the stored
+    // credential is stale, so it must at least try to refresh.
+    const originalNow = Date.now
+    const originalSetTimeout = globalThis.setTimeout
+    const originalHome = process.env.HOME
+    const originalFetch = globalThis.fetch
+    const tempHome = await mkdtemp(join(tmpdir(), "opencode-claude-auth-home-"))
+    process.env.HOME = tempHome
+    Date.now = () => 1_700_000_000_000
+    globalThis.setTimeout = (() => ({
+      unref() {},
+    })) as unknown as typeof setTimeout
+
+    try {
+      const { helpersModule, keychainModule } =
+        await loadHelpersWithCountingKeychain(Date.now() + 10 * 60_000)
+      globalThis.fetch = (async () =>
+        new Response('{"name":"revoked"}', { status: 401 })) as typeof fetch
+
+      const plugin = await helpersModule.default({} as never)
+      const typedPlugin = plugin as { auth?: { loader?: TestAuthLoader } }
+      const authConfig = await typedPlugin.auth!.loader!(
+        async () => ({
+          type: "oauth",
+          refresh: "refresh",
+          access: "access",
+          expires: Date.now() + 60_000,
+        }),
+        { models: {} },
+      )
+
+      const readsAtStart = keychainModule.__getReadCount()
+      const response = await authConfig.fetch(
+        "https://api.anthropic.com/v1/messages",
+        {
+          method: "POST",
+          body: JSON.stringify({ model: "claude-haiku-4-5", messages: [] }),
+        },
+      )
+
+      // The refresh cannot succeed here, so the 401 is still returned -- but the
+      // attempt must have happened, which means re-reading the source.
+      assert.equal(response.status, 401)
+      // Exactly two source reads prove the sequence: the reload that found
+      // nothing newer, then the forced refresh. One read means it reloaded and
+      // gave up, which is precisely the bug this covers.
+      assert.equal(
+        keychainModule.__getReadCount() - readsAtStart,
+        2,
+        "expected reload + forced refresh; one read means it surrendered",
+      )
+    } finally {
+      Date.now = originalNow
+      globalThis.setTimeout = originalSetTimeout
+      globalThis.fetch = originalFetch
+      if (typeof originalHome === "string") process.env.HOME = originalHome
+      else delete process.env.HOME
+    }
+  })
+
   it("auth fetch does not retry a 401 when the source token is unchanged", async () => {
     const originalNow = Date.now
     const originalSetTimeout = globalThis.setTimeout

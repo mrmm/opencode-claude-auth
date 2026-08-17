@@ -117,13 +117,29 @@ rotates until you turn it on:
 
 ### Strategies
 
-| Strategy       | Chooses                                         |
-| -------------- | ----------------------------------------------- |
-| `sticky`       | the current account until it is spent (default) |
-| `least-loaded` | whichever has the most headroom                 |
-| `priority`     | the first listed that is usable                 |
-| `round-robin`  | the next one each time                          |
-| `weighted`     | by `weights`, interleaved (smooth weighted RR)  |
+| Strategy       | Chooses                                          |
+| -------------- | ------------------------------------------------ |
+| `sticky`       | the current account until it is spent (default)  |
+| `priority`     | the first listed that is usable                  |
+| `least-loaded` | whichever has the most quota headroom            |
+| `least-used`   | whichever has served fewest requests (usage log) |
+| `round-robin`  | the next one each time, in listed order          |
+| `weighted`     | by `weights`, interleaved (smooth weighted RR)   |
+| `random`       | uniform choice                                   |
+| `p2c`          | samples two at random, keeps the emptier         |
+
+`least-loaded` reads Anthropic's view of consumption; `least-used` reads ours.
+They differ usefully: utilisation is weighted by how expensive each request was
+and a request count is not, so one spreads spend and the other spreads turns.
+`p2c` avoids the herd effect when several OpenCode windows decide independently
+and would otherwise all pile onto whichever account currently looks emptiest.
+
+**List order is priority order.** `priority` takes the first usable account,
+`round-robin` walks them in that order, and ties break that way throughout.
+
+The rotating strategies keep their cursor **per process**, so a series of short
+`opencode run` invocations each start at the first account; spreading happens
+across the requests within one session.
 
 `sticky` is the default on purpose: Anthropic's prompt cache is **per account**,
 so every move starts the new account's cache cold. The rotating strategies
@@ -158,6 +174,74 @@ entirely and every account forms one tier; set `accounts` instead to use a
 subset, in preference order. Account names are Keychain sources — the values
 `opencode auth login` shows, listable with
 `security dump-keychain | grep 'Claude Code'`.
+
+### Presets
+
+A preset is a named arrangement — which accounts, in what order, under which
+strategy — offered as a row in `opencode auth login` above the individual
+accounts. Selecting one is remembered, and beats `preset` in the config.
+
+```jsonc
+"presets": {
+  "rr-12": {
+    "label": "LB round-robin Team 1,2",
+    "strategy": "round-robin",
+    "accounts": ["Team A", "Team B"]
+  },
+  "tiered": {
+    "label": "Team 1+2, fall back to Team 3",
+    "pools": [
+      { "name": "primary", "strategy": "least-loaded", "accounts": ["Team A", "Team B"] },
+      { "name": "reserve", "accounts": ["Team C"] }
+    ]
+  }
+},
+"preset": ""
+```
+
+An account is named either by its exact Keychain source or by any **unique
+fragment of its label**, which is why the above reads `Team B` rather than
+`Claude Code-credentials-bbbb2222`. A fragment matching more than one account is
+refused rather than guessed. A preset declares either `accounts` or `pools`,
+never both, so the effective set never depends on settings the preset did not
+mention. An unknown preset name is ignored rather than fatal — a typo must not
+silently narrow which accounts may serve requests.
+
+`CLAUDE_AUTH_PRESET=<name>` selects one for a single run.
+
+### Usage telemetry
+
+Every response is recorded — which account served it, the model, status,
+duration, and the utilisation the headers reported — to
+`~/.local/share/opencode/claude-auth-usage.jsonl`, along with every rotation.
+The quota cache holds only the newest reading per account, so it answers "how
+full is this account" but never "how much has it served, and how often was it
+refused".
+
+```
+pnpm usage            # last 24h
+pnpm usage -- 7d      # last 7 days
+pnpm usage -- 1h --json
+```
+
+```
+account                               reqs    share    429    err       avg     quota  last used
+Claude Code-credentials-cccc3333         4      40%      0      0     835ms        0%  3m ago
+Claude Code-credentials-aaaa1111         3      30%      0      0     718ms       97%  12s ago
+Claude Code-credentials-bbbb2222         3      30%      0      0    1007ms        2%  9s ago
+
+rotations: 11
+  startup: 5
+  quota-observed: 6
+```
+
+Storage is append-only JSONL rather than SQLite, unlike the token-optimizer
+plugin: this plugin has no runtime dependencies and keeps none, and it is loaded
+by OpenCode, which ships as a Bun binary, while its own tests run under
+`node --test`. A native SQLite module risks failing to load in the first, and
+`bun:sqlite` does not exist in the second. The file is capped and rolls over to
+`.1`; `least-used` reads it through a 30s cache so telemetry never costs more
+than the thing it measures.
 
 ### When an account is spent
 

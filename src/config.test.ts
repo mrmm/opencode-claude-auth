@@ -9,6 +9,7 @@ import {
   envLayer,
   getConfig,
   mergeConfig,
+  parseRatio,
   primeConfig,
   resetConfigCache,
   sanitize,
@@ -217,10 +218,19 @@ describe("balancer config", () => {
       "least-loaded",
       "round-robin",
       "weighted",
+      "least-used",
+      "random",
+      "p2c",
     ]) {
       assert.equal(sanitize({ strategy: s }).strategy, s)
     }
-    assert.equal(sanitize({ strategy: "random" }).strategy, undefined)
+    // A real load-balancer term this plugin does not implement: in-flight
+    // connection counts mean nothing when one process serves one request.
+    assert.equal(
+      sanitize({ strategy: "least-connections" }).strategy,
+      undefined,
+    )
+    assert.equal(sanitize({ strategy: "" }).strategy, undefined)
   })
 
   it("reads switchAt as a ratio or a percentage", () => {
@@ -311,5 +321,37 @@ describe("balancer config", () => {
     assert.equal(DEFAULT_CONFIG.autoSwitch, false)
     assert.equal(DEFAULT_CONFIG.strategy, "sticky")
     assert.deepEqual(DEFAULT_CONFIG.pools, [])
+  })
+})
+
+describe("parseRatio ambiguity", () => {
+  it("reads a bare number above 1 as a percentage", () => {
+    assert.equal(parseRatio(90, 0.5), 0.9)
+    assert.equal(parseRatio(95, 0.5), 0.95)
+  })
+
+  it("reads an explicit percent as written, however small", () => {
+    assert.equal(parseRatio("1.5%", 0.5), 0.015)
+    assert.equal(parseRatio("85%", 0.5), 0.85)
+  })
+
+  it("refuses a bare 1..2, which used to silently mean 1.5%", () => {
+    // Someone writing 1.5 is reaching for "above 100%" to disable a threshold.
+    // Returning 0.015 condemned every account rather than none.
+    assert.equal(parseRatio(1.5, 0.95), 0.95)
+    assert.equal(parseRatio(1.01, 0.95), 0.95)
+  })
+
+  it("still accepts the boundaries either side", () => {
+    assert.equal(parseRatio(1, 0.5), 1)
+    assert.equal(parseRatio(2, 0.5), 0.02)
+    assert.equal(parseRatio(0.015, 0.5), 0.015)
+  })
+
+  it("falls back on nonsense", () => {
+    assert.equal(parseRatio("abc", 0.5), 0.5)
+    assert.equal(parseRatio(0, 0.5), 0.5)
+    assert.equal(parseRatio(-1, 0.5), 0.5)
+    assert.equal(parseRatio("150%", 0.5), 0.5)
   })
 })

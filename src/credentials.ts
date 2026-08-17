@@ -70,6 +70,16 @@ export function refreshAccountsList(): ClaudeAccount[] {
 export const AUTO_SOURCE = "__auto__"
 
 /**
+ * Prefix marking the persisted choice as a named preset rather than one account.
+ *
+ * The same file carries all three answers to "what should serve requests" — a
+ * source, `__auto__`, or `preset:<name>` — because they are mutually exclusive
+ * answers to one question, and splitting them across files would invite two of
+ * them being set at once.
+ */
+export const PRESET_PREFIX = "preset:"
+
+/**
  * The account list already in memory, without touching the Keychain.
  *
  * `refreshAccountsList()` re-reads the Keychain, which is far too expensive for

@@ -68,11 +68,26 @@ export function parseRatio(
   fallback: number,
 ): number {
   if (input === undefined || input === null || input === "") return fallback
+
+  const text = String(input)
+  const isPercent = typeof input === "string" && text.includes("%")
   const raw =
-    typeof input === "number"
-      ? input
-      : Number.parseFloat(String(input).replace("%", ""))
+    typeof input === "number" ? input : Number.parseFloat(text.replace("%", ""))
   if (!Number.isFinite(raw) || raw <= 0) return fallback
+
+  // An explicit "%" is always per-hundred, so "1.5%" is 0.015 as written.
+  if (isPercent) {
+    const asRatio = raw / 100
+    return asRatio > 0 && asRatio <= 1 ? asRatio : fallback
+  }
+
+  // A bare number above 1 is read as a percentage, so 90 means 0.9. Between 1
+  // and 2 that guess is unsafe: 1.5 is not plausibly "1.5%", it is someone
+  // reaching for "above 100%" to disable a threshold — and silently returning
+  // 0.015 condemns every account instead of none. Refuse it and keep the
+  // default; write "1.5%" if a hundredth and a half is genuinely meant.
+  if (raw > 1 && raw < 2) return fallback
+
   const asRatio = raw > 1 ? raw / 100 : raw
   return asRatio > 0 && asRatio <= 1 ? asRatio : fallback
 }
@@ -117,6 +132,9 @@ export type BalanceStrategy =
   | "least-loaded"
   | "round-robin"
   | "weighted"
+  | "least-used"
+  | "random"
+  | "p2c"
 
 const STRATEGY_NAMES = new Set<string>([
   "sticky",
@@ -124,6 +142,9 @@ const STRATEGY_NAMES = new Set<string>([
   "least-loaded",
   "round-robin",
   "weighted",
+  "least-used",
+  "random",
+  "p2c",
 ])
 
 export function isBalanceStrategy(v: unknown): v is BalanceStrategy {
@@ -175,6 +196,47 @@ export function parsePools(v: unknown): Pool[] | undefined {
       if (Object.keys(weights).length > 0) pool.weights = weights
     }
     out.push(pool)
+  }
+  return out
+}
+
+/**
+ * A named, selectable configuration: which accounts, in what order, under which
+ * strategy.
+ *
+ * Presets exist because the useful unit of choice is not one account but one
+ * *arrangement* — "round-robin over 1 and 2" is a thing you switch to, and
+ * spelling it out in the config each time you change your mind is not. They are
+ * offered as rows in the account switcher alongside the individual accounts.
+ */
+export type Preset = {
+  /** Shown in the switcher; defaults to the key. */
+  label?: string
+  strategy?: BalanceStrategy
+  /** Accounts in priority order. Ignored when `pools` is set. */
+  accounts?: string[]
+  /** Failover tiers, for a preset that needs more than one. */
+  pools?: Pool[]
+}
+
+export function parsePresets(v: unknown): Record<string, Preset> | undefined {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return undefined
+  const out: Record<string, Preset> = {}
+  for (const [name, raw] of Object.entries(v as Record<string, unknown>)) {
+    if (!raw || typeof raw !== "object") continue
+    const r = raw as Record<string, unknown>
+    const preset: Preset = {}
+    if (typeof r.label === "string" && r.label.trim())
+      preset.label = r.label.trim()
+    if (isBalanceStrategy(r.strategy)) preset.strategy = r.strategy
+    const accounts = parseAccounts(r.accounts)
+    if (accounts && accounts.length > 0) preset.accounts = accounts
+    const pools = parsePools(r.pools)
+    if (pools && pools.length > 0) preset.pools = pools
+    // A preset that names no accounts and no pools would silently mean "all of
+    // them", which is not what anyone writes a preset for.
+    if (!preset.accounts && !preset.pools) continue
+    out[name] = preset
   }
   return out
 }
@@ -245,6 +307,13 @@ export type ClaudeAuthConfig = {
    * exhausted account backs off instead of being retried every cycle.
    */
   ejectFor: number
+  /** Named, switchable arrangements. Offered as rows in the switcher. */
+  presets: Record<string, Preset>
+  /**
+   * Preset applied when nothing has been chosen in the switcher. The switcher's
+   * choice is remembered and wins over this.
+   */
+  preset: string
 }
 
 export const DEFAULT_CONFIG: ClaudeAuthConfig = {
@@ -275,6 +344,8 @@ export const DEFAULT_CONFIG: ClaudeAuthConfig = {
   strategy: "sticky",
   pools: [],
   ejectFor: 5 * 60_000,
+  presets: {},
+  preset: "",
 }
 
 /**
@@ -397,6 +468,11 @@ export function sanitize(raw: unknown): Partial<ClaudeAuthConfig> {
   const pools = parsePools(r.pools)
   if (pools !== undefined) out.pools = pools
 
+  const presets = parsePresets(r.presets)
+  if (presets !== undefined) out.presets = presets
+
+  if (typeof r.preset === "string") out.preset = r.preset.trim()
+
   const durations: Array<[keyof ClaudeAuthConfig, unknown]> = [
     ["refreshCheckInterval", r.refreshCheckInterval],
     ["refreshBeforeExpiry", r.refreshBeforeExpiry],
@@ -482,8 +558,12 @@ export function envLayer(
     const parsed = parseAccounts(env.CLAUDE_AUTH_ACCOUNTS.split(","))
     if (parsed) out.accounts = parsed
   }
-  // `pools` is deliberately file-only: a tiered, per-pool-strategy structure
-  // does not survive being flattened into one environment variable legibly.
+  if (env.CLAUDE_AUTH_PRESET !== undefined) {
+    out.preset = env.CLAUDE_AUTH_PRESET.trim()
+  }
+  // `pools` and `presets` are deliberately file-only: a tiered, per-pool-strategy
+  // structure does not survive being flattened into one environment variable
+  // legibly. CLAUDE_AUTH_PRESET selects one by name, which does.
   return out
 }
 

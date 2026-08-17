@@ -10,7 +10,9 @@ import {
   ejectedUntil,
   resetCursors,
   resetEjections,
+  resolveAccountRefs,
   resolvePools,
+  resolveRef,
   selectAccount,
   type Member,
 } from "./balancer.ts"
@@ -376,5 +378,164 @@ describe("tiered failover", () => {
 
   it("returns nothing when there are no accounts at all", () => {
     assert.equal(selectAccount([], {}, cfg(), null, NOW_MS), undefined)
+  })
+})
+
+describe("usage-driven and randomised strategies", () => {
+  const cache: QuotaCache = {
+    a: reading(0.8),
+    b: reading(0.2),
+    c: reading(0.5),
+  }
+
+  it("least-used picks the account that has served least", () => {
+    const d = selectAccount(
+      members("a", "b", "c"),
+      cache,
+      cfg({ strategy: "least-used" }),
+      "a",
+      NOW_MS,
+      {
+        usage: {
+          a: { requests: 9, lastUsedAt: 3 },
+          b: { requests: 7, lastUsedAt: 2 },
+          c: { requests: 2, lastUsedAt: 1 },
+        },
+      },
+    )
+    // c, even though b has more quota headroom.
+    assert.equal(d!.source, "c")
+  })
+
+  it("least-used breaks a tie on the older last-used", () => {
+    const d = selectAccount(
+      members("a", "b"),
+      cache,
+      cfg({ strategy: "least-used" }),
+      null,
+      NOW_MS,
+      {
+        usage: {
+          a: { requests: 5, lastUsedAt: 900 },
+          b: { requests: 5, lastUsedAt: 100 },
+        },
+      },
+    )
+    assert.equal(d!.source, "b")
+  })
+
+  it("least-used falls back to least-loaded with no history", () => {
+    const d = selectAccount(
+      members("a", "b", "c"),
+      cache,
+      cfg({ strategy: "least-used" }),
+      "a",
+      NOW_MS,
+      { usage: {} },
+    )
+    assert.equal(d!.source, "b")
+  })
+
+  it("random honours the injected generator", () => {
+    const pick = (r: number) =>
+      selectAccount(
+        members("a", "b", "c"),
+        cache,
+        cfg({ strategy: "random", accounts: ["a", "b", "c"] }),
+        null,
+        NOW_MS,
+        { rng: () => r },
+      )!.source
+    assert.equal(pick(0), "a")
+    assert.equal(pick(0.5), "b")
+    assert.equal(pick(0.99), "c")
+  })
+
+  it("p2c samples two and keeps the emptier", () => {
+    // First draw picks index 0 (a, 80%), second picks index 2 (c, 50%) -> c wins.
+    const draws = [0, 0.7]
+    let i = 0
+    const d = selectAccount(
+      members("a", "b", "c"),
+      cache,
+      cfg({ strategy: "p2c", accounts: ["a", "b", "c"] }),
+      null,
+      NOW_MS,
+      { rng: () => draws[i++ % draws.length]! },
+    )
+    assert.equal(d!.source, "c")
+  })
+
+  it("p2c on a single candidate returns it without sampling", () => {
+    const d = selectAccount(
+      members("a"),
+      { a: reading(0.1) },
+      cfg({ strategy: "p2c" }),
+      null,
+      NOW_MS,
+      {
+        rng: () => {
+          throw new Error("must not be called")
+        },
+      },
+    )
+    assert.equal(d!.source, "a")
+  })
+})
+
+describe("account references", () => {
+  it("resolves a label fragment as well as an exact source", () => {
+    const live: Member[] = [
+      {
+        source: "Claude Code-credentials-aaaa1111",
+        label: "Claude Team - Team A",
+      },
+      {
+        source: "Claude Code-credentials-bbbb2222",
+        label: "Claude Team - Team B",
+      },
+    ]
+    assert.equal(
+      resolveRef("Team B", live),
+      "Claude Code-credentials-bbbb2222",
+    )
+    assert.equal(
+      resolveRef("Claude Code-credentials-aaaa1111", live),
+      "Claude Code-credentials-aaaa1111",
+    )
+    assert.equal(
+      resolveRef("team a", live),
+      "Claude Code-credentials-aaaa1111",
+    )
+  })
+
+  it("refuses an ambiguous fragment rather than guessing", () => {
+    const live: Member[] = [
+      { source: "s1", label: "Claude Team - Team A" },
+      { source: "s2", label: "Claude Team - Team B" },
+    ]
+    assert.equal(resolveRef("Claude Team", live), undefined)
+  })
+
+  it("reports references that went nowhere", () => {
+    const live: Member[] = [{ source: "s1", label: "Team A" }]
+    const { sources, unresolved } = resolveAccountRefs(
+      ["Team A", "Team Z"],
+      live,
+    )
+    assert.deepEqual(sources, ["s1"])
+    assert.deepEqual(unresolved, ["Team Z"])
+  })
+
+  it("lets a pool name accounts by label", () => {
+    const live: Member[] = [
+      { source: "s1", label: "Team A" },
+      { source: "s2", label: "Team B" },
+    ]
+    const pools = resolvePools(
+      live,
+      cfg({ pools: [{ name: "p", accounts: ["Team B"] }] }),
+    )
+    assert.deepEqual(pools[0]!.accounts, ["s2"])
   })
 })

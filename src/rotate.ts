@@ -14,13 +14,15 @@
  */
 
 import {
+  PRESET_PREFIX,
   getActiveAccount,
   getCachedCredentials,
   listAccounts,
+  loadPersistedAccountSource,
   setActiveAccountSource,
   syncAuthJson,
 } from "./credentials.ts"
-import { getConfig } from "./config.ts"
+import { type ClaudeAuthConfig, getConfig } from "./config.ts"
 import { emitNotice } from "./notify.ts"
 import { log } from "./logger.ts"
 import {
@@ -37,6 +39,53 @@ import {
   readQuotaCache,
   writeQuotaForAccount,
 } from "./quota.ts"
+import { currentUsageIndex, recordRotation } from "./usage.ts"
+
+/**
+ * Fold the selected preset into the config.
+ *
+ * Precedence is deliberate: what you chose in the switcher beats `preset` in the
+ * file, which beats the bare top-level settings. A preset named but not defined
+ * is ignored rather than fatal — a typo should not silently narrow which
+ * accounts may serve requests.
+ */
+export function resolveActiveConfig(
+  cfg: ClaudeAuthConfig,
+  persisted: string | null,
+): { cfg: ClaudeAuthConfig; preset: string | null } {
+  const chosen = persisted?.startsWith(PRESET_PREFIX)
+    ? persisted.slice(PRESET_PREFIX.length)
+    : cfg.preset || null
+  if (!chosen) return { cfg, preset: null }
+
+  const preset = cfg.presets[chosen]
+  if (!preset) {
+    log("preset_unknown", {
+      requested: chosen,
+      known: Object.keys(cfg.presets),
+    })
+    return { cfg, preset: null }
+  }
+
+  return {
+    cfg: {
+      ...cfg,
+      ...(preset.strategy ? { strategy: preset.strategy } : {}),
+      // A preset declares either a flat list or tiers, never a mix: letting a
+      // preset's accounts sit alongside inherited pools would make the effective
+      // set depend on settings the preset never mentioned.
+      ...(preset.pools
+        ? { pools: preset.pools, accounts: [] }
+        : { accounts: preset.accounts ?? [], pools: [] }),
+    },
+    preset: chosen,
+  }
+}
+
+/** The preset in force, or null. */
+export function activePreset(): string | null {
+  return resolveActiveConfig(getConfig(), loadPersistedAccountSource()).preset
+}
 
 /**
  * Can this account's stored credentials serve a request?
@@ -68,13 +117,20 @@ export function credentialState(
  */
 export function maybeRotate(trigger: string): Decision | undefined {
   try {
-    const cfg = getConfig()
+    const { cfg, preset } = resolveActiveConfig(
+      getConfig(),
+      loadPersistedAccountSource(),
+    )
     if (!cfg.autoSwitch) return undefined
 
     const accounts = listAccounts()
     if (accounts.length <= 1) return undefined
 
     const active = getActiveAccount()?.source ?? null
+    // Only `least-used` reads the usage log, so only it pays for it.
+    const wantsUsage =
+      cfg.strategy === "least-used" ||
+      cfg.pools.some((p) => p.strategy === "least-used")
     const decision = selectAccount(
       accounts.map((a) => ({
         source: a.source,
@@ -84,6 +140,8 @@ export function maybeRotate(trigger: string): Decision | undefined {
       readQuotaCache(),
       cfg,
       active,
+      Date.now(),
+      { usage: wantsUsage ? currentUsageIndex() : {} },
     )
     if (!decision || !decision.changed) return undefined
 
@@ -113,11 +171,20 @@ export function maybeRotate(trigger: string): Decision | undefined {
 
     log("rotate_applied", {
       trigger,
+      preset,
       from,
       to: decision.source,
       pool: decision.pool,
       strategy: decision.strategy,
       reason: decision.reason,
+    })
+
+    recordRotation({
+      from_account: from,
+      to_account: decision.source,
+      trigger,
+      strategy: decision.strategy,
+      pool: decision.pool,
     })
 
     if (from) {

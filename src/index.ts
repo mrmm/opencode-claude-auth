@@ -19,6 +19,7 @@ import {
   writeQuotaForAccount,
 } from "./quota.ts"
 import { maybeRotate, noteRejection, noteSuccess } from "./rotate.ts"
+import { recordRequest } from "./usage.ts"
 import {
   addExcludedBeta,
   getExcludedBetas,
@@ -34,6 +35,7 @@ import {
 } from "./transforms.ts"
 import {
   AUTO_SOURCE,
+  PRESET_PREFIX,
   getActiveAccount,
   getCachedCredentials,
   reloadCredentialsFromSource,
@@ -662,6 +664,7 @@ const plugin: PluginWithOptions = async (
               .filter(Boolean)
             log("fetch_headers_built", { headerKeys, betas, modelId })
 
+            const startedAt = Date.now()
             let response = await fetchWithRetry(requestUrl, {
               ...requestInit,
               body,
@@ -829,8 +832,10 @@ const plugin: PluginWithOptions = async (
             // Every Anthropic response reports this account's utilisation and
             // reset time. Recording it here is free, and the account switcher
             // builds its rows synchronously so it cannot fetch them itself.
+            let observedQuota: ReturnType<typeof parseQuotaHeaders>
             try {
               const quota = parseQuotaHeaders(response.headers)
+              observedQuota = quota
               const source = getActiveAccount()?.source ?? null
               if (quota && source) {
                 writeQuotaForAccount(source, quota)
@@ -845,12 +850,32 @@ const plugin: PluginWithOptions = async (
               // Never let bookkeeping break a response.
             }
 
+            // Usage history, which the quota cache cannot provide: it holds only
+            // the latest reading per account, so it answers "how full is this
+            // account" but never "how much has it served, and how often was it
+            // refused". Recorded for every response, refusals included.
+            const servedBy = getActiveAccount()?.source ?? null
+            if (servedBy) {
+              recordRequest({
+                account: servedBy,
+                model: modelId,
+                status: response.status,
+                duration_ms: Date.now() - startedAt,
+                ...(observedQuota?.fiveHour
+                  ? { utilization_5h: observedQuota.fiveHour.utilization }
+                  : {}),
+                ...(observedQuota?.sevenDay
+                  ? { utilization_7d: observedQuota.sevenDay.utilization }
+                  : {}),
+              })
+            }
+
             // Act on the reading just recorded. Every response is a free
             // measurement of the active account, so this is where exhaustion is
             // noticed *before* the next request is refused — the 429 path above
             // is the safety net, not the main mechanism.
             if (response.ok) {
-              noteSuccess(getActiveAccount()?.source ?? null)
+              noteSuccess(servedBy)
               maybeRotate("quota-observed")
             }
 
@@ -875,11 +900,30 @@ const plugin: PluginWithOptions = async (
             // Values shown come from the cache; this refreshes it for the next
             // open. The getter cannot await, so it cannot show its own result.
             topUpQuota("switcher-open")
+            const cfgNow = getConfig()
             const autoRow: { label: string; value: string; hint?: string } = {
-              label: `Auto — balance across accounts (${getConfig().strategy})`,
+              label: `Auto — balance across accounts (${cfgNow.strategy})`,
               value: AUTO_SOURCE,
             }
             if (currentSource === AUTO_SOURCE) autoRow.hint = "active"
+
+            // Presets first: an arrangement is usually what you want to switch
+            // to, and picking one account out of several is the exception once
+            // more than one is in play.
+            const presetRows = Object.entries(cfgNow.presets).map(
+              ([name, preset]) => {
+                const value = `${PRESET_PREFIX}${name}`
+                const count = preset.pools
+                  ? preset.pools.reduce((n, p) => n + p.accounts.length, 0)
+                  : (preset.accounts?.length ?? 0)
+                const row: { label: string; value: string; hint?: string } = {
+                  label: `${preset.label ?? name} — ${preset.strategy ?? cfgNow.strategy} over ${count}`,
+                  value,
+                }
+                if (currentSource === value) row.hint = "active"
+                return row
+              },
+            )
 
             return [
               {
@@ -892,6 +936,7 @@ const plugin: PluginWithOptions = async (
                 // "API key" prompt, and every account becomes unreachable. Omit
                 // the key instead of setting it to undefined.
                 options: [
+                  ...presetRows,
                   autoRow,
                   ...currentAccounts.map((a) => {
                     const option: {
@@ -913,32 +958,43 @@ const plugin: PluginWithOptions = async (
           async authorize(inputs) {
             const latestAccounts = refreshAccountsList()
 
-            if (inputs?.account === AUTO_SOURCE) {
-              // Clear the pin, then let the strategy pick straight away, so the
-              // confirmation can name the account you will actually be on
-              // rather than promising a decision made later.
-              saveAccountSource(AUTO_SOURCE)
+            // A preset and Auto differ only in which accounts are eligible, so
+            // they share one path: persist the choice, let the strategy pick now.
+            const chosenPreset = inputs?.account?.startsWith(PRESET_PREFIX)
+              ? inputs.account.slice(PRESET_PREFIX.length)
+              : null
+
+            if (inputs?.account === AUTO_SOURCE || chosenPreset) {
+              saveAccountSource(inputs!.account!)
               if (!getActiveAccount() && latestAccounts[0]) {
                 setActiveAccountSource(latestAccounts[0].source)
               }
-              maybeRotate("switcher-auto")
+              maybeRotate(chosenPreset ? "switcher-preset" : "switcher-auto")
 
               const active =
                 getActiveAccount() ?? latestAccounts[0] ?? accounts[0]
-              const autoCreds = getCachedCredentials() ?? active.credentials
-              syncAuthJson(autoCreds)
+              const creds = getCachedCredentials() ?? active.credentials
+              syncAuthJson(creds)
+
+              const cfgNow = getConfig()
+              const what = chosenPreset
+                ? `Preset "${cfgNow.presets[chosenPreset]?.label ?? chosenPreset}"`
+                : `Balancing across ${latestAccounts.length} accounts`
+              const how = chosenPreset
+                ? (cfgNow.presets[chosenPreset]?.strategy ?? cfgNow.strategy)
+                : cfgNow.strategy
 
               return {
                 url: "",
-                instructions: `Balancing across ${latestAccounts.length} accounts (${getConfig().strategy}) — currently ${active.label}.`,
+                instructions: `${what} (${how}) — currently ${active.label}.`,
                 method: "auto",
                 async callback() {
                   return {
                     type: "success",
                     provider: "anthropic",
-                    access: autoCreds.accessToken,
-                    refresh: autoCreds.refreshToken,
-                    expires: autoCreds.expiresAt,
+                    access: creds.accessToken,
+                    refresh: creds.refreshToken,
+                    expires: creds.expiresAt,
                   }
                 },
               }

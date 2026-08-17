@@ -229,12 +229,51 @@ export function assess(
  * is dropped rather than honoured, and a pool left empty by that is dropped
  * too: a stale config must not be able to strand the plugin on no account.
  */
+/**
+ * Turn one account reference into a live Keychain source.
+ *
+ * A reference is either an exact source (`Claude Code-credentials-aaaa1111`) or
+ * a case-insensitive fragment of the account's label (`Team B`). The fragment
+ * form exists so a preset reads like the thing it is — "round-robin over Team A
+ * and Team B" — rather than a row of hex suffixes nobody can check by eye.
+ *
+ * A fragment matching more than one account returns undefined rather than
+ * guessing: silently picking one of two plausible accounts is worse than saying
+ * the reference was no good.
+ */
+export function resolveRef(
+  ref: string,
+  members: readonly Member[],
+): string | undefined {
+  const exact = members.find((m) => m.source === ref)
+  if (exact) return exact.source
+
+  const needle = ref.trim().toLowerCase()
+  if (!needle) return undefined
+  const hits = members.filter((m) => m.label?.toLowerCase().includes(needle))
+  return hits.length === 1 ? hits[0]!.source : undefined
+}
+
+/** Resolve a list of references, reporting the ones that went nowhere. */
+export function resolveAccountRefs(
+  refs: readonly string[],
+  members: readonly Member[],
+): { sources: string[]; unresolved: string[] } {
+  const sources: string[] = []
+  const unresolved: string[] = []
+  for (const ref of refs) {
+    const source = resolveRef(ref, members)
+    if (!source) unresolved.push(ref)
+    else if (!sources.includes(source)) sources.push(source)
+  }
+  return { sources, unresolved }
+}
+
 export function resolvePools(
   members: readonly Member[],
   cfg: Pick<ClaudeAuthConfig, "pools" | "accounts" | "strategy">,
 ): Pool[] {
-  const live = new Set(members.map((m) => m.source))
-  const keep = (sources: string[]) => sources.filter((s) => live.has(s))
+  const keep = (refs: string[]) => resolveAccountRefs(refs, members).sources
 
   if (cfg.pools.length > 0) {
     return cfg.pools
@@ -242,7 +281,8 @@ export function resolvePools(
       .filter((p) => p.accounts.length > 0)
   }
 
-  const flat = cfg.accounts.length > 0 ? keep(cfg.accounts) : [...live]
+  const flat =
+    cfg.accounts.length > 0 ? keep(cfg.accounts) : members.map((m) => m.source)
   if (flat.length === 0) return []
   return [{ name: "default", accounts: flat }]
 }
@@ -257,6 +297,10 @@ export type StrategyInput = {
   /** The account serving requests right now, if any. */
   activeSource: string | null
   pool: Pool
+  /** Requests served per account, for `least-used`. Empty when unknown. */
+  usage: Record<string, { requests: number; lastUsedAt: number }>
+  /** Injected so the randomised strategies can be asserted in a test. */
+  rng: () => number
 }
 
 export type StrategyFn = (input: StrategyInput) => string
@@ -359,8 +403,54 @@ const weighted: StrategyFn = ({ candidates, pool }) => {
 }
 
 /**
+ * Fewest requests served, per the usage log; oldest last-used breaks a tie.
+ *
+ * Where `least-loaded` reads Anthropic's view of consumption, this reads ours.
+ * The two disagree usefully: utilisation is weighted by how expensive the
+ * requests were, request count is not, so this spreads *turns* evenly while
+ * `least-loaded` spreads *spend*. With no usage history it degrades to
+ * `least-loaded` rather than picking arbitrarily.
+ */
+const leastUsed: StrategyFn = (input) => {
+  const { candidates, usage } = input
+  if (Object.keys(usage).length === 0) return leastLoaded(input)
+  const scored = [...candidates].sort((a, b) => {
+    const ua = usage[a.source] ?? { requests: 0, lastUsedAt: 0 }
+    const ub = usage[b.source] ?? { requests: 0, lastUsedAt: 0 }
+    return ua.requests - ub.requests || ua.lastUsedAt - ub.lastUsedAt
+  })
+  return scored[0]!.source
+}
+
+/** Uniform choice. Cheap, stateless, and surprisingly even over many turns. */
+const random: StrategyFn = ({ candidates, rng }) =>
+  candidates[
+    Math.min(candidates.length - 1, Math.floor(rng() * candidates.length))
+  ]!.source
+
+/**
+ * Power of two choices: sample two at random, keep the emptier.
+ *
+ * Gets most of `least-loaded`'s balance without always stampeding onto whichever
+ * account currently looks emptiest — the classic fix for the herd effect when
+ * several processes decide independently, which is exactly this plugin's
+ * situation with several OpenCode windows open.
+ */
+const p2c: StrategyFn = (input) => {
+  const { candidates, rng } = input
+  if (candidates.length === 1) return candidates[0]!.source
+  const i = Math.floor(rng() * candidates.length)
+  let j = Math.floor(rng() * candidates.length)
+  if (j === i) j = (i + 1) % candidates.length
+  const a = candidates[Math.min(i, candidates.length - 1)]!
+  const b = candidates[Math.min(j, candidates.length - 1)]!
+  return byHeadroom(a, b) <= 0 ? a.source : b.source
+}
+
+/**
  * The registry. A new algorithm is one entry here plus one name in
- * `BalanceStrategy` — nothing else in the plugin has to know about it.
+ * `BalanceStrategy` — nothing else in the plugin has to know about it, and the
+ * exhaustive Record makes forgetting the entry a compile error.
  */
 export const STRATEGIES: Record<BalanceStrategy, StrategyFn> = {
   sticky,
@@ -368,6 +458,9 @@ export const STRATEGIES: Record<BalanceStrategy, StrategyFn> = {
   "least-loaded": leastLoaded,
   "round-robin": roundRobin,
   weighted,
+  "least-used": leastUsed,
+  random,
+  p2c,
 }
 
 // ---------------------------------------------------------------------------
@@ -391,12 +484,20 @@ export type Decision = {
  * refusing to choose would strand the session with no credentials at all, and
  * the caller can say when relief arrives.
  */
+export type SelectOptions = {
+  /** Requests served per account, for `least-used`. */
+  usage?: Record<string, { requests: number; lastUsedAt: number }>
+  /** Injected for the randomised strategies. */
+  rng?: () => number
+}
+
 export function selectAccount(
   members: readonly Member[],
   cache: QuotaCache,
   cfg: ClaudeAuthConfig,
   activeSource: string | null,
   nowMs: number = Date.now(),
+  opts: SelectOptions = {},
 ): Decision | undefined {
   const pools = resolvePools(members, cfg)
   if (pools.length === 0) return undefined
@@ -413,7 +514,13 @@ export function selectAccount(
 
     const strategy = pool.strategy ?? cfg.strategy
     const fn = STRATEGIES[strategy] ?? sticky
-    const source = fn({ candidates, activeSource, pool })
+    const source = fn({
+      candidates,
+      activeSource,
+      pool,
+      usage: opts.usage ?? {},
+      rng: opts.rng ?? Math.random,
+    })
     return {
       source,
       pool: pool.name,

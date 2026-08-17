@@ -21,10 +21,10 @@ import {
   loadPersistedAccountSource,
   setActiveAccountSource,
   syncAuthJson,
-} from "./credentials.ts"
-import { type ClaudeAuthConfig, getConfig } from "./config.ts"
-import { emitNotice } from "./notify.ts"
-import { log } from "./logger.ts"
+} from "../credentials.ts"
+import { type ClaudeAuthConfig, getConfig } from "../config.ts"
+import { emitNotice } from "../notify.ts"
+import { log } from "../logger.ts"
 import {
   type CredentialState,
   type Decision,
@@ -32,7 +32,7 @@ import {
   eject,
   selectAccount,
 } from "./balancer.ts"
-import type { ClaudeAccount } from "./keychain.ts"
+import type { ClaudeAccount } from "../keychain.ts"
 import {
   type HeaderLike,
   bindingWindow,

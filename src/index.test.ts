@@ -7,7 +7,7 @@ import {
   rmSync,
   readdirSync,
 } from "node:fs"
-import { mkdtemp, readFile, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, dirname } from "node:path"
 import { before, describe, it } from "node:test"
@@ -142,9 +142,24 @@ for (const key of [
   delete process.env[key]
 }
 
-const SOURCE_FILES = readdirSync(new URL(".", import.meta.url)).filter(
-  (f) => f.endsWith(".ts") && !f.endsWith(".test.ts"),
-)
+// Recursive: modules live in domain folders (balance/, ui/) as well as beside
+// index.ts, and a non-recursive read silently omitted them — which is this very
+// failure mode a fourth time, now with subdirectories instead of a new file.
+// Paths are kept relative so the temp copy mirrors the real tree exactly.
+function collectSourceFiles(dir = "."): string[] {
+  const out: string[] = []
+  for (const entry of readdirSync(new URL(`./${dir}/`, import.meta.url), {
+    withFileTypes: true,
+  })) {
+    const rel = dir === "." ? entry.name : `${dir}/${entry.name}`
+    if (entry.isDirectory()) out.push(...collectSourceFiles(rel))
+    else if (entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts"))
+      out.push(rel)
+  }
+  return out
+}
+
+const SOURCE_FILES = collectSourceFiles()
 
 async function copySourceFiles(
   tempDir: string,
@@ -155,7 +170,7 @@ async function copySourceFiles(
       let source = await readFile(new URL(`./${file}`, import.meta.url), "utf8")
       source = source.replace(
         /from\s+["']\.\/([\w-]+)\.js["']/g,
-        'from "./$1.ts"',
+        'from "./1.ts"',
       )
       if (opts?.oauthTokenUrl && file === "credentials.ts") {
         // Point the OAuth refresh subprocess at a local test server so the
@@ -165,7 +180,9 @@ async function copySourceFiles(
           opts.oauthTokenUrl,
         )
       }
-      await writeFile(join(tempDir, file), source, "utf8")
+      const dest = join(tempDir, file)
+      await mkdir(dirname(dest), { recursive: true })
+      await writeFile(dest, source, "utf8")
     }),
   )
 }

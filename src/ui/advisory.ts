@@ -11,14 +11,14 @@
  * unless something is actually actionable.
  */
 
-import type { Notice } from "./notify.ts"
+import type { Notice } from "../notify.ts"
 import {
   bindingWindow,
   formatDuration,
   quotaForAccount,
   type AccountQuota,
   type QuotaCache,
-} from "./quota.ts"
+} from "../balance/quota.ts"
 
 /** Above this, the active account is worth warning about. */
 export const WARN_AT = 0.9

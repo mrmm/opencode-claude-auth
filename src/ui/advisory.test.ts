@@ -9,7 +9,7 @@ import {
   shortenLabel,
   type AdvisoryAccount,
 } from "./advisory.ts"
-import type { AccountQuota, QuotaCache } from "./quota.ts"
+import type { AccountQuota, QuotaCache } from "../balance/quota.ts"
 
 const NOW = 1785162626
 

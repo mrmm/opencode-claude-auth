@@ -4,6 +4,102 @@ import { config, getModelOverride } from "./model-config.ts"
 const TOOL_PREFIX = "mcp_"
 
 /**
+ * Flatten a JSON Schema `input_schema` that uses top-level `oneOf`, `allOf`,
+ * or `anyOf` — which the Anthropic Messages API rejects — into a plain
+ * `properties` + `required` object.
+ *
+ * Strategy:
+ * - `oneOf` / `anyOf`: each variant contributes its `properties`; all
+ *   resulting properties are optional (no `required` array).
+ * - `allOf`: merge every subschema's properties into one flat object;
+ *   intersect `required` arrays (keep only fields present in ALL).
+ * - If none of these keys are present, the schema is returned unchanged.
+ */
+export function flattenInputSchema(
+  schema: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!schema || typeof schema !== "object") return schema
+
+  const oneOf = schema["oneOf"] as Array<Record<string, unknown>> | undefined
+  const anyOf = schema["anyOf"] as Array<Record<string, unknown>> | undefined
+  const allOf = schema["allOf"] as Array<Record<string, unknown>> | undefined
+
+  // Nothing to flatten
+  if (!oneOf && !anyOf && !allOf) return schema
+
+  // --- oneOf / anyOf: union of properties, all optional ---
+  if (oneOf || anyOf) {
+    const variants = oneOf ?? anyOf ?? []
+    const mergedProperties: Record<string, unknown> = {}
+
+    for (const variant of variants) {
+      if (variant && typeof variant === "object") {
+        const props = variant["properties"] as
+          | Record<string, unknown>
+          | undefined
+        if (props && typeof props === "object") {
+          Object.assign(mergedProperties, props)
+        }
+      }
+    }
+
+    const result: Record<string, unknown> = {
+      type: "object",
+      properties: mergedProperties,
+    }
+    // Intentionally no `required` — union variants are all optional.
+    if (schema["description"]) {
+      result["description"] = schema["description"]
+    }
+    return result
+  }
+
+  // --- allOf: intersect of properties + required ---
+  if (allOf) {
+    const mergedProperties: Record<string, unknown> = {}
+    let requiredSets: Array<Set<string>> = []
+
+    for (const sub of allOf) {
+      if (sub && typeof sub === "object") {
+        const props = sub["properties"] as Record<string, unknown> | undefined
+        if (props && typeof props === "object") {
+          Object.assign(mergedProperties, props)
+        }
+        const req = sub["required"]
+        if (Array.isArray(req)) {
+          requiredSets.push(new Set(req as string[]))
+        }
+      }
+    }
+
+    const result: Record<string, unknown> = {
+      type: "object",
+      properties: mergedProperties,
+    }
+
+    // Intersect: keep only keys present in ALL required arrays.
+    if (requiredSets.length > 0) {
+      let intersection = requiredSets[0]
+      for (let i = 1; i < requiredSets.length; i++) {
+        intersection = new Set(
+          [...intersection].filter((k) => requiredSets[i].has(k)),
+        )
+      }
+      if (intersection.size > 0) {
+        result["required"] = [...intersection].sort()
+      }
+    }
+
+    if (schema["description"]) {
+      result["description"] = schema["description"]
+    }
+    return result
+  }
+
+  return schema
+}
+
+/**
  * Prefix a tool name with TOOL_PREFIX and uppercase the first character.
  * Claude Code uses PascalCase tool names (e.g. mcp_Bash, mcp_Read);
  * lowercase names (mcp_bash, mcp_read) are flagged as non-Claude-Code clients.
@@ -103,7 +199,12 @@ export function transformBody(
       thinking?: Record<string, unknown>
       // eslint-disable-next-line @typescript-eslint/naming-convention
       output_config?: Record<string, unknown>
-      tools?: Array<{ name?: string } & Record<string, unknown>>
+      tools?: Array<
+        { name?: string; input_schema?: Record<string, unknown> } & Record<
+          string,
+          unknown
+        >
+      >
       messages?: Array<{
         role?: string
         content?:
@@ -229,10 +330,28 @@ export function transformBody(
     // when multiple tools are present. Claude Code uses PascalCase after
     // the mcp_ prefix (e.g. mcp_Bash, mcp_Read). Apply the same convention.
     if (Array.isArray(parsed.tools)) {
-      parsed.tools = parsed.tools.map((tool) => ({
-        ...tool,
-        name: tool.name ? prefixName(tool.name) : tool.name,
-      }))
+      parsed.tools = parsed.tools.map((tool) => {
+        const renamed = {
+          ...tool,
+          name: tool.name ? prefixName(tool.name) : tool.name,
+        }
+
+        // Flatten input_schema that uses top-level oneOf/anyOf/allOf,
+        // which the Anthropic Messages API rejects (error path
+        // tools.N.custom.input_schema). MCP servers like example-notion
+        // produce schemas with these constructs.
+        const inputSchema = renamed["input_schema"] as
+          | Record<string, unknown>
+          | undefined
+        if (inputSchema && typeof inputSchema === "object") {
+          const flat = flattenInputSchema(inputSchema)
+          if (flat !== inputSchema) {
+            renamed["input_schema"] = flat
+          }
+        }
+
+        return renamed
+      })
     }
 
     if (Array.isArray(parsed.messages)) {

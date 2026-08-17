@@ -1,25 +1,29 @@
 import type { Plugin, PluginInput } from "@opencode-ai/plugin"
+import {
+  applyAccountLabelToConfig,
+  buildAdvisory,
+  getAccountLabelPlacement,
+  noticeKey,
+  noticeToToast,
+} from "./ui/index.ts"
+import {
+  formatQuotaPrefix,
+  maybeRotate,
+  noteRejection,
+  noteSuccess,
+  parseQuotaHeaders,
+  quotaForAccount,
+  readQuotaCache,
+  recordRequest,
+  refreshQuotas,
+  writeQuotaForAccount,
+} from "./balance/index.ts"
 import crypto from "node:crypto"
 import { config } from "./model-config.ts"
 import { readAllClaudeAccounts, type ClaudeAccount } from "./keychain.ts"
 import { initLogger, log } from "./logger.ts"
-import {
-  applyAccountLabelToConfig,
-  getAccountLabelPlacement,
-} from "./display.ts"
-import { buildAdvisory, noticeKey, noticeToToast } from "./advisory.ts"
 import { setNoticeSink } from "./notify.ts"
 import { getConfig, primeConfig } from "./config.ts"
-import {
-  formatQuotaPrefix,
-  parseQuotaHeaders,
-  quotaForAccount,
-  readQuotaCache,
-  refreshQuotas,
-  writeQuotaForAccount,
-} from "./quota.ts"
-import { maybeRotate, noteRejection, noteSuccess } from "./rotate.ts"
-import { recordRequest } from "./usage.ts"
 import {
   addExcludedBeta,
   getExcludedBetas,
@@ -75,7 +79,7 @@ export {
   decorateName,
   getAccountLabelPlacement,
   type AccountLabelPlacement,
-} from "./display.ts"
+} from "./ui/index.ts"
 export {
   buildBillingHeaderValue,
   computeCch,
@@ -571,7 +575,7 @@ const plugin: PluginWithOptions = async (
   let registeredTools: Record<string, unknown> | undefined
   if (getConfig().tools) {
     try {
-      registeredTools = (await import("./tools.ts")).claudeAuthTools
+      registeredTools = (await import("./ui/tools.ts")).claudeAuthTools
       log("tools_registered", { names: Object.keys(registeredTools) })
     } catch (err) {
       log("tools_register_failed", {

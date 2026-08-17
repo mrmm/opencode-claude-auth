@@ -29,7 +29,7 @@ import { dirname, join } from "node:path"
 import { AUTO_SOURCE, PRESET_PREFIX } from "../dist/credentials.js"
 import { getConfig } from "../dist/config.js"
 import { readAllClaudeAccounts } from "../dist/keychain.js"
-import { resolveRef } from "../dist/balancer.js"
+import { resolveRef } from "../dist/balance/balancer.js"
 
 const STATE = join(
   homedir(),

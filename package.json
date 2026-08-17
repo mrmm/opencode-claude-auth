@@ -58,13 +58,14 @@
     "intercept:all": "pnpm run build && node --experimental-strip-types scripts/intercept-claude.ts --all",
     "intercept:update": "pnpm run build && node --experimental-strip-types scripts/intercept-claude.ts --all --update",
     "validate:oauth": "pnpm run build && node --experimental-strip-types scripts/validate-oauth-refresh.ts",
-    "lint": "oxlint && oxfmt --check .",
+    "lint": "oxlint && oxfmt --check . && pnpm run check:structure",
     "lint:fix": "oxlint --fix . && oxfmt --write .",
     "format": "oxfmt --write .",
     "prepublishOnly": "pnpm run build && pnpm test",
     "test:rotation": "pnpm run build && node --experimental-strip-types scripts/test-rotation-headless.ts",
     "usage": "pnpm run build && node --experimental-strip-types scripts/usage-report.ts",
-    "lb": "pnpm run build && node --experimental-strip-types scripts/lb.ts"
+    "lb": "pnpm run build && node --experimental-strip-types scripts/lb.ts",
+    "check:structure": "node --experimental-strip-types scripts/check-structure.ts"
   },
   "devDependencies": {
     "@opencode-ai/plugin": "latest",

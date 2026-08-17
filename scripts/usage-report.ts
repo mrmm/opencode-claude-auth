@@ -6,8 +6,8 @@
  *   pnpm usage -- 7d        last 7 days
  *   pnpm usage -- 1h --json machine-readable
  */
-import { bindingWindow, readQuotaCache } from "../dist/quota.js"
-import { readUsage, summarize, usagePath } from "../dist/usage.js"
+import { bindingWindow, readQuotaCache } from "../dist/balance/quota.js"
+import { readUsage, summarize, usagePath } from "../dist/balance/usage.js"
 
 const args = process.argv.slice(2)
 const asJson = args.includes("--json")

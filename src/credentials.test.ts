@@ -84,7 +84,7 @@ async function loadCredentialsWithCountingKeychain(
     "utf8",
   )
   const rewritten = sourceCredentials
-    .replace(/from\s+["']\.\/(\w+)\.js["']/g, 'from "./$1.ts"')
+    .replace(/from\s+["']\.\/(\w+)\.js["']/g, 'from "./1.ts"')
     .replace(
       'import { execFileSync, execSync } from "node:child_process"',
       'import { execFileSync, execSync } from "./child-process.ts"',
@@ -931,7 +931,7 @@ describe("syncAuthJson file permissions", () => {
       )
       const rewritten = sourceCredentials.replace(
         /from\s+["']\.\/(\w+)\.js["']/g,
-        'from "./$1.ts"',
+        'from "./1.ts"',
       )
 
       await writeFile(
@@ -1017,7 +1017,7 @@ export function buildAccountLabels(creds) { return creds.map((_, i) => \`Account
       )
       const rewritten = sourceCredentials.replace(
         /from\s+["']\.\/(\w+)\.js["']/g,
-        'from "./$1.ts"',
+        'from "./1.ts"',
       )
 
       await writeFile(

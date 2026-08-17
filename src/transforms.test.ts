@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 import {
+  flattenInputSchema,
   repairToolPairs,
   stripToolPrefix,
   transformBody,
@@ -944,5 +945,217 @@ describe("transforms", () => {
       !text.includes("mcp_beta"),
       `Should not contain mcp_beta in: ${text}`,
     )
+  })
+
+  describe("flattenInputSchema", () => {
+    it("passes through schema with no oneOf/anyOf/allOf unchanged", () => {
+      const schema = {
+        type: "object",
+        properties: { q: { type: "string" } },
+        required: ["q"],
+      }
+      assert.deepEqual(flattenInputSchema(schema), schema)
+    })
+
+    it("flattens anyOf into optional properties", () => {
+      // Real-world shape from example-notion's notion-create-attachment
+      const schema = {
+        anyOf: [
+          {
+            type: "object",
+            properties: {
+              filename: { type: "string" },
+              content: { type: "string" },
+            },
+            required: ["filename", "content"],
+          },
+          {
+            type: "object",
+            properties: {
+              filename: { type: "string" },
+              source_url: { type: "string" },
+            },
+            required: ["filename", "source_url"],
+          },
+        ],
+      }
+      const result = flattenInputSchema(schema)
+      assert.equal(result.type, "object")
+      assert.deepEqual(Object.keys(result.properties).sort(), [
+        "content",
+        "filename",
+        "source_url",
+      ])
+      assert.equal(
+        result["required"],
+        undefined,
+        "union should have no required",
+      )
+    })
+
+    it("flattens oneOf into optional properties", () => {
+      const schema = {
+        oneOf: [
+          { type: "object", properties: { a: { type: "string" } } },
+          { type: "object", properties: { b: { type: "number" } } },
+        ],
+      }
+      const result = flattenInputSchema(schema)
+      assert.equal(result.type, "object")
+      assert.deepEqual(Object.keys(result.properties).sort(), ["a", "b"])
+    })
+
+    it("flattens allOf by merging properties and intersecting required", () => {
+      const schema = {
+        allOf: [
+          {
+            type: "object",
+            properties: { a: { type: "string" }, b: { type: "string" } },
+            required: ["a", "b"],
+          },
+          {
+            type: "object",
+            properties: { b: { type: "string" }, c: { type: "number" } },
+            required: ["b", "c"],
+          },
+        ],
+      }
+      const result = flattenInputSchema(schema)
+      assert.equal(result.type, "object")
+      assert.deepEqual(Object.keys(result.properties).sort(), ["a", "b", "c"])
+      // Intersection: only "b" is required in both
+      assert.deepEqual(result["required"], ["b"])
+    })
+
+    it("preserves description from top-level schema", () => {
+      const schema = {
+        description: "Upload a file to Notion",
+        anyOf: [
+          { type: "object", properties: { content: { type: "string" } } },
+        ],
+      }
+      const result = flattenInputSchema(schema)
+      assert.equal(result["description"], "Upload a file to Notion")
+    })
+
+    it("handles null/non-object input gracefully", () => {
+      assert.equal(flattenInputSchema(null), null)
+      assert.equal(flattenInputSchema(undefined), undefined)
+      assert.equal(flattenInputSchema("string"), "string")
+    })
+
+    it("handles empty variants array", () => {
+      const schema = { oneOf: [] }
+      const result = flattenInputSchema(schema)
+      assert.equal(result.type, "object")
+      assert.deepEqual(result.properties, {})
+    })
+
+    it("handles allOf with no required in any subschema", () => {
+      const schema = {
+        allOf: [
+          { type: "object", properties: { a: { type: "string" } } },
+          { type: "object", properties: { b: { type: "number" } } },
+        ],
+      }
+      const result = flattenInputSchema(schema)
+      assert.equal(result["required"], undefined)
+    })
+
+    it("allOf intersection that yields empty required drops the field", () => {
+      const schema = {
+        allOf: [
+          {
+            type: "object",
+            properties: { a: { type: "string" } },
+            required: ["a"],
+          },
+          {
+            type: "object",
+            properties: { b: { type: "string" } },
+            required: ["b"],
+          },
+        ],
+      }
+      const result = flattenInputSchema(schema)
+      assert.equal(result["required"], undefined)
+    })
+  })
+
+  describe("transformBody - input_schema flattening", () => {
+    it("flattens tool with anyOf input_schema before sending to API", () => {
+      const input = JSON.stringify({
+        tools: [
+          {
+            name: "notion_create_attachment",
+            input_schema: {
+              anyOf: [
+                {
+                  type: "object",
+                  properties: {
+                    filename: { type: "string" },
+                    content: { type: "string" },
+                  },
+                  required: ["filename", "content"],
+                },
+                {
+                  type: "object",
+                  properties: {
+                    filename: { type: "string" },
+                    source_url: { type: "string" },
+                  },
+                  required: ["filename", "source_url"],
+                },
+              ],
+            },
+          },
+        ],
+        messages: [{ role: "user", content: "test" }],
+      })
+
+      const output = transformBody(input)
+      const parsed = JSON.parse(output as string) as {
+        tools: Array<{
+          name: string
+          input_schema: { type: string; properties: Record<string, unknown> }
+        }>
+      }
+
+      assert.equal(parsed.tools[0].name, "mcp_Notion_create_attachment")
+      const schema = parsed.tools[0].input_schema
+      assert.equal(schema.type, "object")
+      assert.deepEqual(Object.keys(schema.properties).sort(), [
+        "content",
+        "filename",
+        "source_url",
+      ])
+    })
+
+    it("leaves tools without anyOf/oneOf/allOf unchanged", () => {
+      const input = JSON.stringify({
+        tools: [
+          {
+            name: "search",
+            input_schema: {
+              type: "object",
+              properties: { q: { type: "string" } },
+              required: ["q"],
+            },
+          },
+        ],
+        messages: [{ role: "user", content: "test" }],
+      })
+
+      const output = transformBody(input)
+      const parsed = JSON.parse(output as string) as {
+        tools: Array<{ input_schema: Record<string, unknown> }>
+      }
+
+      assert.deepEqual(parsed.tools[0].input_schema, {
+        type: "object",
+        properties: { q: { type: "string" } },
+        required: ["q"],
+      })
+    })
   })
 })

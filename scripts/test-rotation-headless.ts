@@ -38,9 +38,9 @@ import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
 import { readAllClaudeAccounts } from "../dist/keychain.js"
-import { bindingWindow, readQuotaCache } from "../dist/quota.js"
-import { assess } from "../dist/balancer.js"
-import { credentialState } from "../dist/rotate.js"
+import { bindingWindow, readQuotaCache } from "../dist/balance/quota.js"
+import { assess } from "../dist/balance/balancer.js"
+import { credentialState } from "../dist/balance/rotate.js"
 import { DEFAULT_CONFIG } from "../dist/config.js"
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..")

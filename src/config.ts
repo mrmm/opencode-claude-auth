@@ -26,7 +26,7 @@ import {
   DEFAULT_PLACEMENT,
   isAccountLabelPlacement,
   type AccountLabelPlacement,
-} from "./display.ts"
+} from "./ui/display.ts"
 import { parseKeep, parseLevel, parseSize, type LogLevel } from "./logger.ts"
 
 export const CONFIG_FILENAME = "claude-auth.jsonc"

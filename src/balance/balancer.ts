@@ -21,7 +21,7 @@ import type {
   ClaudeAuthConfig,
   Pool,
   SwitchWindow,
-} from "./config.ts"
+} from "../config.ts"
 import {
   type AccountQuota,
   type QuotaCache,

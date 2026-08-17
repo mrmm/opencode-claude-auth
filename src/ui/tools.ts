@@ -25,8 +25,8 @@
 import { tool } from "@opencode-ai/plugin"
 import { z } from "zod"
 
-import { assess, resolveRef } from "./balancer.ts"
-import { getConfig } from "./config.ts"
+import { assess, resolveRef } from "../balance/balancer.ts"
+import { getConfig } from "../config.ts"
 import {
   AUTO_SOURCE,
   PRESET_PREFIX,
@@ -34,10 +34,15 @@ import {
   listAccounts,
   loadPersistedAccountSource,
   saveAccountSource,
-} from "./credentials.ts"
-import { formatQuotaPrefix, readQuotaCache } from "./quota.ts"
-import { credentialState, maybeRotate, resolveActiveConfig } from "./rotate.ts"
-import { readUsage, summarize } from "./usage.ts"
+} from "../credentials.ts"
+import { formatQuotaPrefix, readQuotaCache } from "../balance/quota.ts"
+import { parseWindowMs } from "./tools-format.ts"
+import {
+  credentialState,
+  maybeRotate,
+  resolveActiveConfig,
+} from "../balance/rotate.ts"
+import { readUsage, summarize } from "../balance/usage.ts"
 
 const members = () =>
   listAccounts().map((a) => ({ source: a.source, label: a.label }))
@@ -173,15 +178,7 @@ export const claudeAuthTools = {
     },
     async execute({ window }) {
       const spec = window && /^\d+[smhd]$/.test(window) ? window : "24h"
-      const units: Record<string, number> = {
-        s: 1000,
-        m: 60_000,
-        h: 3_600_000,
-        d: 86_400_000,
-      }
-      const since =
-        Date.now() -
-        Number.parseInt(spec, 10) * (units[spec.slice(-1)] ?? units.h!)
+      const since = Date.now() - parseWindowMs(window)
       const summary = summarize(readUsage(since), since)
 
       if (summary.accounts.length === 0) {

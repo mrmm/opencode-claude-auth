@@ -1,0 +1,91 @@
+# opencode-claude-auth
+
+> An OpenCode plugin that authenticates the Anthropic provider with Claude Code
+> subscription credentials from the macOS Keychain, and balances requests across
+> several Claude accounts — rotating off one when its quota is spent, without
+> re-authenticating and without interrupting the agent.
+
+This is a **fork** of `griffinmartin/opencode-claude-auth`, tracked as the
+`upstream` remote and merged from periodically. That fact shapes the layout:
+files upstream also owns stay where upstream put them, and the fork's own code
+lives in domain folders. See `AGENTS.md` for the rules this imposes on changes.
+
+Runtime facts worth knowing before reading code:
+
+- Zero runtime dependencies. `@opencode-ai/plugin` is a peer, and it is imported
+  for a value in exactly one module (`src/ui/tools.ts`), loaded dynamically.
+- Source is TypeScript with `.ts` import specifiers, compiled to `dist/` by
+  `tsc`. OpenCode loads `dist/`, so editing `src/` changes nothing until a build.
+- Tests run under `node --test --experimental-strip-types`. OpenCode itself runs
+  on Bun. Anything added must work under both.
+- The access token is resolved **per request** inside the plugin's own `fetch`,
+  which is why switching accounts takes effect on the next call with no provider
+  reload and nothing cancelled.
+
+## Entry point
+
+- [src/index.ts](src/index.ts): the plugin. Registers the `auth` hook (provider
+  loader + the account switcher), the `config` hook (account label), the request
+  path (custom `fetch`, retries, beta exclusion, quota capture), and the tools.
+  Upstream-owned and the largest module; prefer adding to a domain folder.
+
+## Balancing (fork-owned)
+
+- [src/balance/balancer.ts](src/balance/balancer.ts): pure decision logic — health
+  assessment, pools as failover tiers, and eight strategies behind one registry.
+  No I/O and no clock; everything is a function of (members, quota, config, now).
+- [src/balance/rotate.ts](src/balance/rotate.ts): the side-effecting half. Reads
+  config at each decision, which is what keeps strategy and presets hot-reloadable.
+- [src/balance/quota.ts](src/balance/quota.ts): parses `anthropic-ratelimit-unified-*`
+  response headers into a per-account cache. The 5h/7d windows and their reset epochs.
+- [src/balance/usage.ts](src/balance/usage.ts): append-only JSONL telemetry —
+  requests served, refusals, latency, rotations.
+
+## Credentials (upstream-owned)
+
+- [src/credentials.ts](src/credentials.ts): account list, active-account selection,
+  refresh, `auth.json` sync.
+- [src/keychain.ts](src/keychain.ts): reads Claude Code credentials from the macOS
+  Keychain, including per-directory suffixed entries.
+- [src/refresh-lock.ts](src/refresh-lock.ts): per-account lock so concurrent
+  sessions cannot revoke each other's tokens.
+- [src/signing.ts](src/signing.ts): request signing helpers.
+
+## Request shaping (upstream-owned)
+
+- [src/transforms.ts](src/transforms.ts): body/stream transforms for API compatibility.
+- [src/betas.ts](src/betas.ts): anthropic-beta header management and long-context fallback.
+- [src/model-config.ts](src/model-config.ts): per-model configuration.
+
+## Presentation (fork-owned)
+
+- [src/ui/display.ts](src/ui/display.ts): decorates provider and model names with
+  the active account.
+- [src/ui/advisory.ts](src/ui/advisory.ts): turns notices into toasts.
+- [src/ui/tools.ts](src/ui/tools.ts): the `claude_auth_status` / `claude_auth_select`
+  / `claude_auth_usage` tools.
+- [src/notify.ts](src/notify.ts): the notice types and sink. Stays at the root
+  because upstream's `credentials.ts` imports it.
+
+## Cross-cutting
+
+- [src/config.ts](src/config.ts): layered config (defaults < user file < project
+  file < inline < env), re-read on a stat check so edits apply without a restart.
+- [src/logger.ts](src/logger.ts): structured JSONL debug log with key-based
+  redaction of credential fields.
+
+## Operator surfaces
+
+- [scripts/lb.ts](scripts/lb.ts): `pnpm lb` — select preset/account/auto by
+  writing the selection file. Safe mid-task.
+- [scripts/usage-report.ts](scripts/usage-report.ts): `pnpm usage` — per-account report.
+- [scripts/test-rotation-headless.ts](scripts/test-rotation-headless.ts):
+  `pnpm test:rotation` — real `opencode run` end-to-end rotation assertions.
+- [scripts/test-headless.ts](scripts/test-headless.ts): `pnpm test:headless` —
+  credential refresh flows against a sandboxed fake keychain.
+
+## Optional
+
+- [README.md](README.md): install, configuration reference, strategies, presets.
+- [AGENTS.md](AGENTS.md): the rules a change must follow, and how they are checked.
+- [CHANGELOG.md](CHANGELOG.md): release history.

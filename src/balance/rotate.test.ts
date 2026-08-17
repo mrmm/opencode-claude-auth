@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
-import { DEFAULT_CONFIG, type ClaudeAuthConfig } from "./config.ts"
+import { DEFAULT_CONFIG, type ClaudeAuthConfig } from "../config.ts"
 import { credentialState, resolveActiveConfig } from "./rotate.ts"
 
 const cfg = (over: Partial<ClaudeAuthConfig> = {}): ClaudeAuthConfig => ({

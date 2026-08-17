@@ -77,6 +77,108 @@ export function parseRatio(
   return asRatio > 0 && asRatio <= 1 ? asRatio : fallback
 }
 
+/**
+ * Which rate-limit window a switch decision reads. "binding" follows whichever
+ * of the two is closer to its limit, so a spent weekly budget moves the
+ * account even while the 5h figure still looks healthy.
+ */
+export type SwitchWindow = "5h" | "7d" | "binding"
+
+const SWITCH_WINDOWS = new Set<string>(["5h", "7d", "binding"])
+
+export function isSwitchWindow(v: unknown): v is SwitchWindow {
+  return typeof v === "string" && SWITCH_WINDOWS.has(v)
+}
+
+/**
+ * Keep the strings, drop everything else, and preserve the order given: the
+ * order is the preference order, so it carries meaning beyond membership.
+ */
+export function parseAccounts(v: unknown): string[] | undefined {
+  if (!Array.isArray(v)) return undefined
+  const out = v
+    .filter((e): e is string => typeof e === "string")
+    .map((e) => e.trim())
+    .filter((e) => e.length > 0)
+  return [...new Set(out)]
+}
+
+/**
+ * How one pool chooses among its healthy members.
+ *
+ * `sticky` is the default because Anthropic's prompt cache is per-account:
+ * every move to another account starts that account's cache cold, so a
+ * strategy that rotates freely trades cache hits for headroom. The rotating
+ * strategies are here for when spreading load matters more than that.
+ */
+export type BalanceStrategy =
+  | "sticky"
+  | "priority"
+  | "least-loaded"
+  | "round-robin"
+  | "weighted"
+
+const STRATEGY_NAMES = new Set<string>([
+  "sticky",
+  "priority",
+  "least-loaded",
+  "round-robin",
+  "weighted",
+])
+
+export function isBalanceStrategy(v: unknown): v is BalanceStrategy {
+  return typeof v === "string" && STRATEGY_NAMES.has(v)
+}
+
+/**
+ * A group of accounts that share a strategy. Pool order is failover order:
+ * a pool is only reached when every pool before it has no healthy member.
+ */
+export type Pool = {
+  name: string
+  accounts: string[]
+  /** Omitted means the top-level `strategy`. */
+  strategy?: BalanceStrategy
+  /** Per-account weight for `weighted`; missing entries weigh 1. */
+  weights?: Record<string, number>
+}
+
+/**
+ * Keep only pools that name at least one account. A pool that survives
+ * parsing but matches no live account is dropped later, at selection time,
+ * where the live account list is known.
+ */
+export function parsePools(v: unknown): Pool[] | undefined {
+  if (!Array.isArray(v)) return undefined
+  const out: Pool[] = []
+  for (const [i, raw] of v.entries()) {
+    if (!raw || typeof raw !== "object") continue
+    const r = raw as Record<string, unknown>
+    const accounts = parseAccounts(r.accounts)
+    if (!accounts || accounts.length === 0) continue
+    const pool: Pool = {
+      name:
+        typeof r.name === "string" && r.name.trim()
+          ? r.name.trim()
+          : `pool${i}`,
+      accounts,
+    }
+    if (isBalanceStrategy(r.strategy)) pool.strategy = r.strategy
+    if (r.weights && typeof r.weights === "object") {
+      const weights: Record<string, number> = {}
+      for (const [k, w] of Object.entries(
+        r.weights as Record<string, unknown>,
+      )) {
+        const n = Number(w)
+        if (Number.isFinite(n) && n > 0) weights[k] = n
+      }
+      if (Object.keys(weights).length > 0) pool.weights = weights
+    }
+    out.push(pool)
+  }
+  return out
+}
+
 export type ClaudeAuthConfig = {
   /** false disables logging; true uses the default path; a string is a path. */
   debug: boolean | string
@@ -109,6 +211,40 @@ export type ClaudeAuthConfig = {
   quotaAlternativeAt: number
   /** How often the config file itself is re-checked for edits. */
   configReloadInterval: number
+
+  /**
+   * Which accounts may serve requests, in preference order, by Keychain
+   * source. Empty means every account the Keychain offers. An entry that
+   * matches nothing is ignored, so a stale config cannot strand the plugin
+   * with no usable account.
+   */
+  accounts: string[]
+  /**
+   * Move to another account by itself when the active one runs out. Off by
+   * default: changing which subscription serves a request is the kind of
+   * thing that should be asked for rather than assumed.
+   */
+  autoSwitch: boolean
+  /** Utilisation at or above which the active account is abandoned. */
+  switchAt: number
+  /** Also move when Anthropic actually refuses a request (429). */
+  switchOn429: boolean
+  /** Which window `switchAt` is measured against. */
+  switchWindow: SwitchWindow
+  /** Strategy for pools that do not name their own. */
+  strategy: BalanceStrategy
+  /**
+   * Failover tiers, tried in order. Empty means one implicit pool holding
+   * `accounts` (or every Keychain account when that is empty too), so the
+   * simple single-tier case needs no pool declaration at all.
+   */
+  pools: Pool[]
+  /**
+   * How long an account stays ejected after being found spent without a reset
+   * time to trust. Multiplied by consecutive ejections, so a repeatedly
+   * exhausted account backs off instead of being retried every cycle.
+   */
+  ejectFor: number
 }
 
 export const DEFAULT_CONFIG: ClaudeAuthConfig = {
@@ -130,6 +266,15 @@ export const DEFAULT_CONFIG: ClaudeAuthConfig = {
   quotaWeeklyWarnAt: 0.85,
   quotaAlternativeAt: 0.7,
   configReloadInterval: 3000,
+
+  accounts: [],
+  autoSwitch: false,
+  switchAt: 0.95,
+  switchOn429: true,
+  switchWindow: "binding",
+  strategy: "sticky",
+  pools: [],
+  ejectFor: 5 * 60_000,
 }
 
 /**
@@ -237,6 +382,21 @@ export function sanitize(raw: unknown): Partial<ClaudeAuthConfig> {
 
   if (isAccountLabelPlacement(r.accountLabel)) out.accountLabel = r.accountLabel
 
+  const autoSwitch = bool(r.autoSwitch)
+  if (autoSwitch !== undefined) out.autoSwitch = autoSwitch
+
+  const on429 = bool(r.switchOn429)
+  if (on429 !== undefined) out.switchOn429 = on429
+
+  if (isSwitchWindow(r.switchWindow)) out.switchWindow = r.switchWindow
+  if (isBalanceStrategy(r.strategy)) out.strategy = r.strategy
+
+  const accounts = parseAccounts(r.accounts)
+  if (accounts !== undefined) out.accounts = accounts
+
+  const pools = parsePools(r.pools)
+  if (pools !== undefined) out.pools = pools
+
   const durations: Array<[keyof ClaudeAuthConfig, unknown]> = [
     ["refreshCheckInterval", r.refreshCheckInterval],
     ["refreshBeforeExpiry", r.refreshBeforeExpiry],
@@ -244,6 +404,7 @@ export function sanitize(raw: unknown): Partial<ClaudeAuthConfig> {
     ["quotaProbeMaxAge", r.quotaProbeMaxAge],
     ["quotaMaxAge", r.quotaMaxAge],
     ["configReloadInterval", r.configReloadInterval],
+    ["ejectFor", r.ejectFor],
   ]
   for (const [key, value] of durations) {
     if (value === undefined) continue
@@ -258,6 +419,7 @@ export function sanitize(raw: unknown): Partial<ClaudeAuthConfig> {
     ["quotaWarnAt", r.quotaWarnAt],
     ["quotaWeeklyWarnAt", r.quotaWeeklyWarnAt],
     ["quotaAlternativeAt", r.quotaAlternativeAt],
+    ["switchAt", r.switchAt],
   ]
   for (const [key, value] of ratios) {
     if (value === undefined) continue
@@ -298,6 +460,30 @@ export function envLayer(
   if (isAccountLabelPlacement(env.CLAUDE_AUTH_ACCOUNT_LABEL)) {
     out.accountLabel = env.CLAUDE_AUTH_ACCOUNT_LABEL
   }
+  if (env.CLAUDE_AUTH_AUTO_SWITCH !== undefined) {
+    out.autoSwitch = env.CLAUDE_AUTH_AUTO_SWITCH === "1"
+  }
+  if (env.CLAUDE_AUTH_SWITCH_ON_429 !== undefined) {
+    out.switchOn429 = env.CLAUDE_AUTH_SWITCH_ON_429 === "1"
+  }
+  if (env.CLAUDE_AUTH_SWITCH_AT) {
+    out.switchAt = parseRatio(
+      env.CLAUDE_AUTH_SWITCH_AT,
+      DEFAULT_CONFIG.switchAt,
+    )
+  }
+  if (isSwitchWindow(env.CLAUDE_AUTH_SWITCH_WINDOW)) {
+    out.switchWindow = env.CLAUDE_AUTH_SWITCH_WINDOW
+  }
+  if (isBalanceStrategy(env.CLAUDE_AUTH_STRATEGY)) {
+    out.strategy = env.CLAUDE_AUTH_STRATEGY
+  }
+  if (env.CLAUDE_AUTH_ACCOUNTS !== undefined) {
+    const parsed = parseAccounts(env.CLAUDE_AUTH_ACCOUNTS.split(","))
+    if (parsed) out.accounts = parsed
+  }
+  // `pools` is deliberately file-only: a tiered, per-pool-strategy structure
+  // does not survive being flattened into one environment variable legibly.
   return out
 }
 

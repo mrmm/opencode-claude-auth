@@ -94,6 +94,88 @@ Select "Switch Claude Code account" and pick the account you want to use. Your s
 
 If only one account is found, the switcher is hidden and the plugin uses it directly.
 
+## Balancing across accounts
+
+The switcher's first row is **Auto — balance across accounts**. Pick it and the
+plugin chooses the account itself, moving off one when it runs out of quota.
+Pick a named account instead and that choice is pinned and persisted, exactly as
+before.
+
+Switching is hot. The access token is resolved per request, so a move takes
+effect on the very next call — no provider reload, no OpenCode restart. Nothing
+rotates until you turn it on:
+
+```jsonc
+{
+  "autoSwitch": true, // off by default
+  "switchAt": 0.95, // abandon an account at this utilisation
+  "switchWindow": "binding", // "5h" | "7d" | "binding" (whichever is closer to its limit)
+  "switchOn429": true, // also move when Anthropic actually refuses
+  "strategy": "sticky"
+}
+```
+
+### Strategies
+
+| Strategy       | Chooses                                          |
+| -------------- | ------------------------------------------------ |
+| `sticky`       | the current account until it is spent (default)  |
+| `least-loaded` | whichever has the most headroom                  |
+| `priority`     | the first listed that is usable                  |
+| `round-robin`  | the next one each time                           |
+| `weighted`     | by `weights`, interleaved (smooth weighted RR)   |
+
+`sticky` is the default on purpose: Anthropic's prompt cache is **per account**,
+so every move starts the new account's cache cold. The rotating strategies
+spread load at the cost of cache hits — worth it when headroom matters more than
+latency and input-token spend, and a bad trade otherwise.
+
+### Pools and fallback
+
+Pools are failover tiers, tried in order. A tier is only reached when every
+account above it is spent, so "balance across these two, fall back to that one"
+is:
+
+```jsonc
+{
+  "autoSwitch": true,
+  "pools": [
+    {
+      "name": "primary",
+      "strategy": "least-loaded",
+      "accounts": ["Claude Code-credentials-aaaa1111", "Claude Code-credentials-bbbb2222"]
+    },
+    { "name": "reserve", "accounts": ["Claude Code-credentials"] }
+  ]
+}
+```
+
+A pool may override `strategy` and set per-account `weights`. Omit `pools`
+entirely and every account forms one tier; set `accounts` instead to use a
+subset, in preference order. Account names are Keychain sources — the values
+`opencode auth login` shows, listable with
+`security dump-keychain | grep 'Claude Code'`.
+
+### When an account is spent
+
+Health is derived from the rate-limit headers Anthropic returns on every
+response, so nothing extra is stored and nothing expires by guesswork: an
+account is spent when `utilization >= switchAt` or the server says `rejected`,
+and it is healthy again once the window's own reset time passes. A refusal that
+arrives without a reset time gets a bounded ejection instead, backing off on
+each consecutive failure (`ejectFor`, default 5m).
+
+When every account in every tier is spent, the plugin stays put rather than
+thrashing, and the toast names the account that frees up first.
+
+Every automatic move raises a toast naming the new account, because the
+provider/model label is applied once when OpenCode loads its config and cannot
+be rewritten mid-session — without the toast the switch would be invisible.
+
+A rotation is deliberately **not** persisted. The file behind the switcher holds
+the account *you* chose; letting one OpenCode window's exhaustion rewrite it
+would move every other window too, and would erase a pin you set on purpose.
+
 ## Troubleshooting
 
 | Problem                                             | Solution                                                                                                                                  |

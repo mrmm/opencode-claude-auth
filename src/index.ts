@@ -18,6 +18,7 @@ import {
   refreshQuotas,
   writeQuotaForAccount,
 } from "./quota.ts"
+import { maybeRotate, noteRejection, noteSuccess } from "./rotate.ts"
 import {
   addExcludedBeta,
   getExcludedBetas,
@@ -32,6 +33,7 @@ import {
   transformResponseStream,
 } from "./transforms.ts"
 import {
+  AUTO_SOURCE,
   getActiveAccount,
   getCachedCredentials,
   reloadCredentialsFromSource,
@@ -351,8 +353,11 @@ const plugin: PluginWithOptions = async (
 
   if (accounts.length > 0) {
     const persistedSource = loadPersistedAccountSource()
+    const autoMode = persistedSource === AUTO_SOURCE
     const defaultAccount =
-      (persistedSource && accounts.find((a) => a.source === persistedSource)) ||
+      (!autoMode &&
+        persistedSource &&
+        accounts.find((a) => a.source === persistedSource)) ||
       accounts[0]
 
     setActiveAccountSource(defaultAccount.source)
@@ -361,7 +366,13 @@ const plugin: PluginWithOptions = async (
       accountCount: accounts.length,
       sources: accounts.map((a) => a.source),
       activeSource: defaultAccount.source,
+      autoMode,
     })
+
+    // With no pin, the first account is only a starting point — let the
+    // configured strategy have the first word rather than defaulting to
+    // whichever account the Keychain happened to list first.
+    if (autoMode) maybeRotate("startup")
 
     const initialCreds = getCachedCredentials()
     if (initialCreds) {
@@ -761,6 +772,40 @@ const plugin: PluginWithOptions = async (
               })
             }
 
+            // A 429 that survived every retry above is a real exhaustion, not
+            // congestion. Rotate off this account and give the request one more
+            // chance on the next one, so a spent account costs a retry instead
+            // of the turn. The rotation itself is hot: the token is resolved per
+            // request, so nothing has to be re-registered for this to land.
+            if (response.status === 429) {
+              const refusedSource = getActiveAccount()?.source ?? null
+              const rotated = noteRejection(refusedSource, response.headers)
+              const rotatedCreds = rotated ? getCachedCredentials() : null
+              if (
+                rotatedCreds &&
+                rotatedCreds.accessToken !== latest.accessToken
+              ) {
+                log("fetch_retry_after_rotate", {
+                  modelId,
+                  from: refusedSource,
+                  to: rotated?.source,
+                  strategy: rotated?.strategy,
+                })
+                response = await fetchWithRetry(requestUrl, {
+                  ...requestInit,
+                  body,
+                  headers: buildRequestHeaders(
+                    input,
+                    requestInit,
+                    rotatedCreds.accessToken,
+                    modelId,
+                    getExcludedBetas(modelId),
+                  ),
+                })
+                preserveResponseUnchanged = false
+              }
+            }
+
             // Record non-200 responses without writing over OpenCode's terminal UI.
             if (!response.ok) {
               const status = response.status
@@ -800,6 +845,15 @@ const plugin: PluginWithOptions = async (
               // Never let bookkeeping break a response.
             }
 
+            // Act on the reading just recorded. Every response is a free
+            // measurement of the active account, so this is where exhaustion is
+            // noticed *before* the next request is refused — the 429 path above
+            // is the safety net, not the main mechanism.
+            if (response.ok) {
+              noteSuccess(getActiveAccount()?.source ?? null)
+              maybeRotate("quota-observed")
+            }
+
             return preserveResponseUnchanged
               ? response
               : transformResponseStream(response)
@@ -821,6 +875,12 @@ const plugin: PluginWithOptions = async (
             // Values shown come from the cache; this refreshes it for the next
             // open. The getter cannot await, so it cannot show its own result.
             topUpQuota("switcher-open")
+            const autoRow: { label: string; value: string; hint?: string } = {
+              label: `Auto — balance across accounts (${getConfig().strategy})`,
+              value: AUTO_SOURCE,
+            }
+            if (currentSource === AUTO_SOURCE) autoRow.hint = "active"
+
             return [
               {
                 type: "select" as const,
@@ -831,24 +891,58 @@ const plugin: PluginWithOptions = async (
                 // /provider/auth answers 500, the TUI falls back to its built-in
                 // "API key" prompt, and every account becomes unreachable. Omit
                 // the key instead of setting it to undefined.
-                options: currentAccounts.map((a) => {
-                  const option: {
-                    label: string
-                    value: string
-                    hint?: string
-                  } = {
-                    label: prefixWithQuota(a.label, a.source, quotaCache),
-                    value: a.source,
-                  }
-                  if (a.source === currentSource) option.hint = "active"
-                  return option
-                }),
+                options: [
+                  autoRow,
+                  ...currentAccounts.map((a) => {
+                    const option: {
+                      label: string
+                      value: string
+                      hint?: string
+                    } = {
+                      label: prefixWithQuota(a.label, a.source, quotaCache),
+                      value: a.source,
+                    }
+                    if (a.source === currentSource) option.hint = "active"
+                    return option
+                  }),
+                ],
               },
             ]
           },
 
           async authorize(inputs) {
             const latestAccounts = refreshAccountsList()
+
+            if (inputs?.account === AUTO_SOURCE) {
+              // Clear the pin, then let the strategy pick straight away, so the
+              // confirmation can name the account you will actually be on
+              // rather than promising a decision made later.
+              saveAccountSource(AUTO_SOURCE)
+              if (!getActiveAccount() && latestAccounts[0]) {
+                setActiveAccountSource(latestAccounts[0].source)
+              }
+              maybeRotate("switcher-auto")
+
+              const active =
+                getActiveAccount() ?? latestAccounts[0] ?? accounts[0]
+              const autoCreds = getCachedCredentials() ?? active.credentials
+              syncAuthJson(autoCreds)
+
+              return {
+                url: "",
+                instructions: `Balancing across ${latestAccounts.length} accounts (${getConfig().strategy}) — currently ${active.label}.`,
+                method: "auto",
+                async callback() {
+                  return {
+                    type: "success",
+                    provider: "anthropic",
+                    access: autoCreds.accessToken,
+                    refresh: autoCreds.refreshToken,
+                    expires: autoCreds.expiresAt,
+                  }
+                },
+              }
+            }
 
             const source =
               inputs?.account ?? latestAccounts[0]?.source ?? accounts[0].source

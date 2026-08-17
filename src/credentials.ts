@@ -59,6 +59,27 @@ export function refreshAccountsList(): ClaudeAccount[] {
   return allAccounts
 }
 
+/**
+ * Persisted in place of a source to mean "no pin — let the balancer choose".
+ *
+ * It lives in the same file as a pinned source rather than in a new one: that
+ * file already answers exactly this question, "which account should serve
+ * requests", and a sentinel keeps one answer in one place. It cannot collide
+ * with a real value — Keychain sources are service names, never `__auto__`.
+ */
+export const AUTO_SOURCE = "__auto__"
+
+/**
+ * The account list already in memory, without touching the Keychain.
+ *
+ * `refreshAccountsList()` re-reads the Keychain, which is far too expensive for
+ * the per-request path the balancer runs on. The switcher, which opens rarely
+ * and must notice an account added since start-up, keeps using that one.
+ */
+export function listAccounts(): ClaudeAccount[] {
+  return allAccounts
+}
+
 export function getActiveAccount(): ClaudeAccount | null {
   if (allAccounts.length === 0) return null
   if (activeAccountSource) {

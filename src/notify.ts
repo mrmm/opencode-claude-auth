@@ -32,6 +32,20 @@ export type Notice =
       /** The account actually serving requests now. */
       usedSource: string
     }
+  | {
+      /**
+       * The balancer moved on purpose. Distinct from `account-switched`, which
+       * reports a broken credential: here the previous account was fine, it was
+       * simply spent, and saying "could not be refreshed" would be untrue.
+       */
+      kind: "account-rotated"
+      fromSource: string
+      toSource: string
+      /** Already human-readable, e.g. "at 96% of 5h". */
+      reason: string
+      pool: string
+      strategy: string
+    }
 
 export type NoticeSink = (notice: Notice) => void
 

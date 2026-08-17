@@ -208,3 +208,108 @@ function resetCacheClock(): void {
     // busy-wait briefly; the window is 3s
   }
 }
+
+describe("balancer config", () => {
+  it("accepts every strategy name and rejects anything else", () => {
+    for (const s of [
+      "sticky",
+      "priority",
+      "least-loaded",
+      "round-robin",
+      "weighted",
+    ]) {
+      assert.equal(sanitize({ strategy: s }).strategy, s)
+    }
+    assert.equal(sanitize({ strategy: "random" }).strategy, undefined)
+  })
+
+  it("reads switchAt as a ratio or a percentage", () => {
+    assert.equal(sanitize({ switchAt: 0.8 }).switchAt, 0.8)
+    assert.equal(sanitize({ switchAt: "85%" }).switchAt, 0.85)
+  })
+
+  it("takes the window only from the three known values", () => {
+    assert.equal(sanitize({ switchWindow: "7d" }).switchWindow, "7d")
+    assert.equal(sanitize({ switchWindow: "monthly" }).switchWindow, undefined)
+  })
+
+  it("coerces the booleans the way the rest of the file does", () => {
+    assert.equal(sanitize({ autoSwitch: "true" }).autoSwitch, true)
+    assert.equal(sanitize({ switchOn429: "0" }).switchOn429, false)
+  })
+
+  it("trims and de-duplicates accounts while keeping preference order", () => {
+    assert.deepEqual(
+      sanitize({ accounts: [" b ", "a", "b", 7, ""] }).accounts,
+      ["b", "a"],
+    )
+  })
+
+  it("names an unnamed pool by position and drops one with no accounts", () => {
+    const pools = sanitize({
+      pools: [
+        { accounts: ["a"] },
+        { name: "empty", accounts: [] },
+        { accounts: ["b"] },
+      ],
+    }).pools
+    assert.deepEqual(
+      pools?.map((p) => p.name),
+      ["pool0", "pool2"],
+    )
+  })
+
+  it("keeps only positive numeric weights", () => {
+    const pools = sanitize({
+      pools: [
+        { name: "p", accounts: ["a", "b"], weights: { a: 3, b: -1, c: "x" } },
+      ],
+    }).pools
+    assert.deepEqual(pools?.[0]?.weights, { a: 3 })
+  })
+
+  it("keeps a per-pool strategy separate from the top-level one", () => {
+    const out = sanitize({
+      strategy: "sticky",
+      pools: [{ name: "p", accounts: ["a"], strategy: "round-robin" }],
+    })
+    assert.equal(out.strategy, "sticky")
+    assert.equal(out.pools?.[0]?.strategy, "round-robin")
+  })
+
+  it("ignores a bogus per-pool strategy rather than failing the pool", () => {
+    const pools = sanitize({
+      pools: [{ name: "p", accounts: ["a"], strategy: "nope" }],
+    }).pools
+    assert.equal(pools?.length, 1)
+    assert.equal(pools?.[0]?.strategy, undefined)
+  })
+
+  it("reads ejectFor as a duration", () => {
+    assert.equal(sanitize({ ejectFor: "90s" }).ejectFor, 90_000)
+  })
+
+  it("exposes the balancer knobs to the environment, pools excepted", () => {
+    const layer = envLayer({
+      CLAUDE_AUTH_AUTO_SWITCH: "1",
+      CLAUDE_AUTH_SWITCH_AT: "70%",
+      CLAUDE_AUTH_SWITCH_ON_429: "0",
+      CLAUDE_AUTH_SWITCH_WINDOW: "5h",
+      CLAUDE_AUTH_STRATEGY: "least-loaded",
+      CLAUDE_AUTH_ACCOUNTS: "a, b ,a",
+    } as NodeJS.ProcessEnv)
+    assert.equal(layer.autoSwitch, true)
+    assert.equal(layer.switchAt, 0.7)
+    assert.equal(layer.switchOn429, false)
+    assert.equal(layer.switchWindow, "5h")
+    assert.equal(layer.strategy, "least-loaded")
+    assert.deepEqual(layer.accounts, ["a", "b"])
+    assert.equal(layer.pools, undefined)
+  })
+
+  it("defaults to off and sticky, so nothing rotates until asked", () => {
+    assert.equal(DEFAULT_CONFIG.autoSwitch, false)
+    assert.equal(DEFAULT_CONFIG.strategy, "sticky")
+    assert.deepEqual(DEFAULT_CONFIG.pools, [])
+  })
+})

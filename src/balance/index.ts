@@ -9,4 +9,5 @@
 export * from "./balancer.ts"
 export * from "./quota.ts"
 export * from "./rotate.ts"
+export * from "./sessions.ts"
 export * from "./usage.ts"

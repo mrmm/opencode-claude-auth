@@ -228,6 +228,39 @@ They are not free. Every description sits in the model's context for the whole
 session, and the agent can call them, which means it can move accounts on its
 own. `"tools": false` turns the set off and leaves the CLI.
 
+### Per-session accounts
+
+Subagents arrive as their own OpenCode sessions, so binding an account per
+session lets N parallel subagents run on N accounts instead of queueing against
+one subscription — and each session keeps its account, so the per-account prompt
+cache stays warm rather than following a global rotation.
+
+```jsonc
+"bindBy": "session"   // or "none" for one account per process
+```
+
+A session keeps its account while that account is usable and moves only when its
+own is spent; other sessions are untouched. The binding is per process and not
+persisted — a session id means nothing in a later one. Mechanically, the session
+id travels from `chat.headers` to the plugin's `fetch` on an internal header
+which is stripped before the request leaves, and that session's token is resolved
+against its own account, never by mutating the globally active one — doing that
+would let concurrent sessions hand each other the wrong token.
+
+### Pins
+
+Selecting one specific account is a pin, and a pin is honoured: the balancer will
+not move off it on threshold or refusal.
+
+```jsonc
+"pinBlocksRotation": true
+```
+
+Choosing something else still applies immediately. Set `false` to make a pin only
+a starting point. Note that only an _explicit_ choice creates a pin — provider
+auth running with no selection no longer records one, because doing so silently
+froze the balancer on a rate-limited account.
+
 ### Presets
 
 A preset is a named arrangement — which accounts, in what order, under which

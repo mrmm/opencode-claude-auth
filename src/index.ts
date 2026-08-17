@@ -14,7 +14,9 @@ import {
   parseQuotaHeaders,
   quotaForAccount,
   readQuotaCache,
+  SESSION_HEADER,
   recordRequest,
+  resolveSessionCredentials,
   refreshQuotas,
   writeQuotaForAccount,
 } from "./balance/index.ts"
@@ -217,6 +219,11 @@ export function buildRequestHeaders(
       }
     }
   }
+
+  // Internal routing marker: it exists only to carry the session id from
+  // chat.headers to the fetch above, and every header here is forwarded, so it
+  // is removed centrally rather than at each call site.
+  headers.delete(SESSION_HEADER)
 
   const modelBetas = getModelBetas(modelId, excludedBetas)
   const incomingBeta = headers.get("anthropic-beta") ?? ""
@@ -587,6 +594,15 @@ const plugin: PluginWithOptions = async (
   return {
     ...(registeredTools ? { tool: registeredTools } : {}),
 
+    // The only place a session id is available. Stamped as a header because the
+    // custom fetch below cannot otherwise know which session a request belongs
+    // to — the provider is registered once, for all of them.
+    "chat.headers": async (input, output) => {
+      if (getConfig().bindBy === "session") {
+        output.headers[SESSION_HEADER] = input.sessionID
+      }
+    },
+
     config: async (opencodeConfig) => {
       // Show which account is serving this session. The switcher label is
       // otherwise visible only while the switcher is open, so with several
@@ -653,7 +669,30 @@ const plugin: PluginWithOptions = async (
           apiKey: "",
           baseURL: "https://api.anthropic.com/v1",
           async fetch(input: RequestInfo | URL, init?: RequestInit) {
-            const latest = getCachedCredentials()
+            // Which session is this? Per-session binding lets parallel
+            // subagents — each its own session — run on different accounts
+            // instead of queueing on one. Resolved per request against that
+            // session's own account, never by mutating the global active one,
+            // because concurrent requests would then race each other's token.
+            // Named apart from the module-level `sessionId`, which is the
+            // synthetic Claude-Code session id sent upstream. This one is
+            // OpenCode's, and the two must never be confused.
+            const ocSessionId = new Headers(
+              (init?.headers ?? {}) as HeadersInit,
+            ).get(SESSION_HEADER)
+            let sessionCreds: ClaudeCredentials | null = null
+            if (ocSessionId && getConfig().bindBy === "session") {
+              try {
+                sessionCreds = resolveSessionCredentials(ocSessionId)
+              } catch (err) {
+                log("session_bind_failed", {
+                  sessionId: ocSessionId,
+                  error: err instanceof Error ? err.message : String(err),
+                })
+              }
+            }
+
+            const latest = sessionCreds ?? getCachedCredentials()
             if (!latest) {
               log("fetch_no_credentials", { modelId: "unknown" })
               throw new Error(
@@ -1051,7 +1090,18 @@ const plugin: PluginWithOptions = async (
             const creds = getCachedCredentials() ?? chosen.credentials
 
             syncAuthJson(creds)
-            saveAccountSource(chosen.source)
+
+            // Only an explicit choice becomes a pin. authorize() also runs with
+            // no inputs — a first run, or any flow that re-enters provider auth
+            // — and persisting the fallback account there records a pin nobody
+            // asked for. With pinBlocksRotation on, that silently freezes the
+            // balancer: observed as a run that sat on a rate-limited account
+            // logging rotate_blocked_by_pin because it was not allowed to move.
+            if (inputs?.account) {
+              saveAccountSource(chosen.source)
+            } else {
+              log("authorize_implicit_no_pin", { source: chosen.source })
+            }
 
             const sourceDescription =
               chosen.source === "file"

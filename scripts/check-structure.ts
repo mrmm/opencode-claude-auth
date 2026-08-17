@@ -112,7 +112,7 @@ for (const f of prod) {
 // edits down to one import line. Fork-owned files importing each other
 // precisely is better than dragging a whole domain in through a barrel, so the
 // rule applies only where the merge cost is real.
-const DOMAINS = ["balance", "ui"]
+const DOMAINS = new Set(["balance", "ui"])
 for (const f of all) {
   const r = rel(f)
   if (r.includes("/")) continue
@@ -120,7 +120,7 @@ for (const f of all) {
   const text = readFileSync(f, "utf-8")
   for (const m of text.matchAll(/from\s+"\.\/(\w+)\/([\w-]+)\.ts"/g)) {
     const [, domain, mod] = m
-    if (DOMAINS.includes(domain!) && mod !== "index" && mod !== "tools") {
+    if (DOMAINS.has(domain!) && mod !== "index" && mod !== "tools") {
       problems.push(
         `${r}: upstream also edits this file — reach ./${domain} through its barrel, not ./${domain}/${mod}.ts, so a merge touches one line.`,
       )

@@ -14,6 +14,7 @@
  */
 
 import {
+  AUTO_SOURCE,
   PRESET_PREFIX,
   getActiveAccount,
   getCachedCredentials,
@@ -156,6 +157,19 @@ export function maybeRotate(
     // An explicit selection — chosen now, or in force at start-up — is obeyed
     // either way, otherwise picking a preset would appear to do nothing.
     if (!cfg.autoSwitch && !changed && !opts.force) return undefined
+
+    // A pin names one account. Moving off it would answer a question the
+    // operator already answered, so threshold and refusal are ignored while one
+    // is set; an explicit change of selection still applies.
+    const pinned =
+      persisted !== null &&
+      persisted !== "" &&
+      persisted !== AUTO_SOURCE &&
+      !persisted.startsWith(PRESET_PREFIX)
+    if (pinned && cfg.pinBlocksRotation && !changed && !opts.force) {
+      log("rotate_blocked_by_pin", { trigger, pinned: persisted })
+      return undefined
+    }
 
     const accounts = listAccounts()
     if (accounts.length <= 1) return undefined

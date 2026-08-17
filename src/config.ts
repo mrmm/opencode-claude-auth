@@ -293,6 +293,17 @@ export type ClaudeAuthConfig = {
   switchOn429: boolean
   /** Which window `switchAt` is measured against. */
   switchWindow: SwitchWindow
+  /**
+   * Bind an account to each session, so parallel subagents — which arrive as
+   * their own sessions — run on different accounts instead of queueing against
+   * one subscription. "none" restores one account per process.
+   */
+  bindBy: "none" | "session"
+  /**
+   * A pin names one specific account, so honour it: do not move off it on
+   * threshold or refusal. Turn off to let a pin be only a starting point.
+   */
+  pinBlocksRotation: boolean
   /** Strategy for pools that do not name their own. */
   strategy: BalanceStrategy
   /**
@@ -349,6 +360,8 @@ export const DEFAULT_CONFIG: ClaudeAuthConfig = {
   switchOn429: true,
   switchWindow: "binding",
   strategy: "sticky",
+  bindBy: "session",
+  pinBlocksRotation: true,
   pools: [],
   ejectFor: 5 * 60_000,
   presets: {},
@@ -461,6 +474,11 @@ export function sanitize(raw: unknown): Partial<ClaudeAuthConfig> {
 
   if (isAccountLabelPlacement(r.accountLabel)) out.accountLabel = r.accountLabel
 
+  if (r.bindBy === "none" || r.bindBy === "session") out.bindBy = r.bindBy
+
+  const pinBlocks = bool(r.pinBlocksRotation)
+  if (pinBlocks !== undefined) out.pinBlocksRotation = pinBlocks
+
   const tools = bool(r.tools)
   if (tools !== undefined) out.tools = tools
 
@@ -568,6 +586,15 @@ export function envLayer(
   if (env.CLAUDE_AUTH_ACCOUNTS !== undefined) {
     const parsed = parseAccounts(env.CLAUDE_AUTH_ACCOUNTS.split(","))
     if (parsed) out.accounts = parsed
+  }
+  if (
+    env.CLAUDE_AUTH_BIND_BY === "none" ||
+    env.CLAUDE_AUTH_BIND_BY === "session"
+  ) {
+    out.bindBy = env.CLAUDE_AUTH_BIND_BY
+  }
+  if (env.CLAUDE_AUTH_PIN_BLOCKS_ROTATION !== undefined) {
+    out.pinBlocksRotation = env.CLAUDE_AUTH_PIN_BLOCKS_ROTATION === "1"
   }
   if (env.CLAUDE_AUTH_TOOLS !== undefined) {
     out.tools = env.CLAUDE_AUTH_TOOLS === "1"

@@ -46,6 +46,14 @@ export type Notice =
       pool: string
       strategy: string
     }
+  | {
+      /** Every account is spent; the plugin stayed put rather than thrash. */
+      kind: "accounts-exhausted"
+      /** The account whose window frees up first. */
+      soonestSource: string
+      /** Unix seconds it frees up, when known. */
+      resetsAt?: number
+    }
 
 export type NoticeSink = (notice: Notice) => void
 

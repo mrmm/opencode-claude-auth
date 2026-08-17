@@ -984,19 +984,19 @@ attributes:
   })
 })
 
-describe("buildAccountLabels — comment precedence", () => {
-  const creds = (sub: string) =>
-    ({
-      accessToken: "a",
-      refreshToken: "r",
-      expiresAt: 0,
-      subscriptionType: sub,
-    }) as never
+const labelCreds = (sub: string) =>
+  ({
+    accessToken: "a",
+    refreshToken: "r",
+    expiresAt: 0,
+    subscriptionType: sub,
+  }) as never
 
+describe("buildAccountLabels — comment precedence", () => {
   it("falls back to email, then to the raw service", () => {
     // No comments are registered in this process, so email wins where present.
     const labels = buildAccountLabels(
-      [creds("team"), creds("team")],
+      [labelCreds("team"), labelCreds("team")],
       ["a@b.c", null],
       ["svc-1", "svc-2"],
     )

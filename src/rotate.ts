@@ -35,6 +35,7 @@ import {
 import type { ClaudeAccount } from "./keychain.ts"
 import {
   type HeaderLike,
+  bindingWindow,
   parseQuotaHeaders,
   readQuotaCache,
   writeQuotaForAccount,
@@ -187,6 +188,13 @@ export function maybeRotate(
         active,
         soonest: decision.source,
         reason: decision.reason,
+      })
+      const soonestReset = readQuotaCache()[decision.source]
+      const w = soonestReset ? bindingWindow(soonestReset) : undefined
+      emitNotice({
+        kind: "accounts-exhausted",
+        soonestSource: decision.source,
+        ...(w?.resetsAt ? { resetsAt: w.resetsAt } : {}),
       })
       return undefined
     }

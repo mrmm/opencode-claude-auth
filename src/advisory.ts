@@ -204,6 +204,21 @@ export function noticeToToast(
         message: `${shortenLabel(notice.fromSource)} ${notice.reason} — now on ${shortenLabel(notice.toSource)} (${notice.strategy}, ${notice.pool}).`,
       }
 
+    case "accounts-exhausted": {
+      // Previously this state was log-only: every account spent and the screen
+      // said nothing, which reads as the plugin having simply stopped.
+      const when = notice.resetsAt
+        ? formatDuration(notice.resetsAt - Math.floor(Date.now() / 1000))
+        : undefined
+      return {
+        variant: "error",
+        title: "All Claude accounts are spent",
+        message: when
+          ? `Staying on ${shortenLabel(notice.soonestSource)}, which frees up in ${when}.`
+          : `Staying on ${shortenLabel(notice.soonestSource)}; no reset time was reported.`,
+      }
+    }
+
     case "refresh-succeeded":
       if (!opts.showSuccess) return undefined
       return {
@@ -227,6 +242,9 @@ export function noticeKey(notice: Notice): string {
       return `failed:${notice.source}`
     case "account-switched":
       return `switched:${notice.failedSource}->${notice.usedSource}`
+    case "accounts-exhausted":
+      // Keyed on the reset, so one message per exhaustion rather than per request.
+      return `exhausted:${notice.resetsAt ?? 0}`
     case "account-rotated":
       // Keyed on the pair, not the reason, so a flapping pair is suppressed by
       // the cooldown while a move to a genuinely new account still speaks up.

@@ -307,6 +307,13 @@ export type ClaudeAuthConfig = {
    * exhausted account backs off instead of being retried every cycle.
    */
   ejectFor: number
+  /**
+   * Register the claude_auth_* tools with OpenCode. They are convenient, and
+   * they are not free: every description sits in the model's context for the
+   * whole session, and the agent can call them. Turn them off to keep the CLI
+   * as the only front door.
+   */
+  tools: boolean
   /** Named, switchable arrangements. Offered as rows in the switcher. */
   presets: Record<string, Preset>
   /**
@@ -346,6 +353,7 @@ export const DEFAULT_CONFIG: ClaudeAuthConfig = {
   ejectFor: 5 * 60_000,
   presets: {},
   preset: "",
+  tools: true,
 }
 
 /**
@@ -453,6 +461,9 @@ export function sanitize(raw: unknown): Partial<ClaudeAuthConfig> {
 
   if (isAccountLabelPlacement(r.accountLabel)) out.accountLabel = r.accountLabel
 
+  const tools = bool(r.tools)
+  if (tools !== undefined) out.tools = tools
+
   const autoSwitch = bool(r.autoSwitch)
   if (autoSwitch !== undefined) out.autoSwitch = autoSwitch
 
@@ -557,6 +568,9 @@ export function envLayer(
   if (env.CLAUDE_AUTH_ACCOUNTS !== undefined) {
     const parsed = parseAccounts(env.CLAUDE_AUTH_ACCOUNTS.split(","))
     if (parsed) out.accounts = parsed
+  }
+  if (env.CLAUDE_AUTH_TOOLS !== undefined) {
+    out.tools = env.CLAUDE_AUTH_TOOLS === "1"
   }
   if (env.CLAUDE_AUTH_PRESET !== undefined) {
     out.preset = env.CLAUDE_AUTH_PRESET.trim()

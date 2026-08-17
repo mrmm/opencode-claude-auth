@@ -205,6 +205,29 @@ A running OpenCode re-reads the selection on its next request. Editing
 (threshold or refusal). An explicit selection is obeyed either way — otherwise
 choosing a preset with `autoSwitch: false` would appear to do nothing.
 
+### Tools
+
+The plugin registers three tools, so the same surfaces are reachable from inside
+a session:
+
+| Tool                 | Does                                                                             |
+| -------------------- | -------------------------------------------------------------------------------- |
+| `claude_auth_status` | who is serving now, what is selected, and each account's verdict with the reason |
+| `claude_auth_select` | switch to a preset, an account, `auto`, or `clear`                               |
+| `claude_auth_usage`  | per-account requests, share, refusals, latency, rotations                        |
+
+They register through the plugin's own `tool` hook rather than a separate MCP
+server: an MCP server would be another process with its own lifecycle and its
+own entry in `opencode.jsonc`, exposing functions that already live in this
+process and read this plugin's state.
+
+`claude_auth_select` is transparent in the way that matters — it writes the
+selection file, so nothing is re-registered and nothing in flight is cancelled.
+
+They are not free. Every description sits in the model's context for the whole
+session, and the agent can call them, which means it can move accounts on its
+own. `"tools": false` turns the set off and leaves the CLI.
+
 ### Presets
 
 A preset is a named arrangement — which accounts, in what order, under which

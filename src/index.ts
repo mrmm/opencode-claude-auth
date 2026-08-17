@@ -264,8 +264,8 @@ const plugin: PluginWithOptions = async (
 ) => {
   // Inline options from opencode.jsonc are only visible here, so record them
   // once; file layers are re-read on change afterwards.
-  const cfg = primeConfig(worktree || directory, options)
-  initLogger({ config: cfg })
+  const initialConfig = primeConfig(worktree || directory, options)
+  initLogger({ config: initialConfig })
 
   let accounts: ClaudeAccount[] = []
   try {
@@ -515,6 +515,12 @@ const plugin: PluginWithOptions = async (
       // a promise (verified: /provider/auth 500). Keeping the cache warm here is
       // what makes the switcher current when it is opened.
       topUpQuota("sync-tick")
+
+      // Rotate on the timer too, not only after a response. Without this a
+      // spent account is discovered by the NEXT request, which pays for the
+      // discovery; on an idle session the move can happen before you type.
+      maybeRotate("sync-tick")
+
       try {
         const account = getActiveAccount()
         log("proactive_refresh_check", {
@@ -557,7 +563,26 @@ const plugin: PluginWithOptions = async (
     )
   }
 
+  // Loaded here rather than imported at module scope: tools.ts pulls in
+  // @opencode-ai/plugin for its `tool()` helper, and having that in the static
+  // graph made node:test cancel 28 subtests in index.test.ts. A dynamic import
+  // runs once, at init, and a failure to load costs the tools rather than the
+  // plugin.
+  let registeredTools: Record<string, unknown> | undefined
+  if (getConfig().tools) {
+    try {
+      registeredTools = (await import("./tools.ts")).claudeAuthTools
+      log("tools_registered", { names: Object.keys(registeredTools) })
+    } catch (err) {
+      log("tools_register_failed", {
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
+
   return {
+    ...(registeredTools ? { tool: registeredTools } : {}),
+
     config: async (opencodeConfig) => {
       // Show which account is serving this session. The switcher label is
       // otherwise visible only while the switcher is open, so with several

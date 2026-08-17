@@ -111,19 +111,19 @@ rotates until you turn it on:
   "switchAt": 0.95, // abandon an account at this utilisation
   "switchWindow": "binding", // "5h" | "7d" | "binding" (whichever is closer to its limit)
   "switchOn429": true, // also move when Anthropic actually refuses
-  "strategy": "sticky"
+  "strategy": "sticky",
 }
 ```
 
 ### Strategies
 
-| Strategy       | Chooses                                          |
-| -------------- | ------------------------------------------------ |
-| `sticky`       | the current account until it is spent (default)  |
-| `least-loaded` | whichever has the most headroom                  |
-| `priority`     | the first listed that is usable                  |
-| `round-robin`  | the next one each time                           |
-| `weighted`     | by `weights`, interleaved (smooth weighted RR)   |
+| Strategy       | Chooses                                         |
+| -------------- | ----------------------------------------------- |
+| `sticky`       | the current account until it is spent (default) |
+| `least-loaded` | whichever has the most headroom                 |
+| `priority`     | the first listed that is usable                 |
+| `round-robin`  | the next one each time                          |
+| `weighted`     | by `weights`, interleaved (smooth weighted RR)  |
 
 `sticky` is the default on purpose: Anthropic's prompt cache is **per account**,
 so every move starts the new account's cache cold. The rotating strategies
@@ -143,10 +143,13 @@ is:
     {
       "name": "primary",
       "strategy": "least-loaded",
-      "accounts": ["Claude Code-credentials-aaaa1111", "Claude Code-credentials-bbbb2222"]
+      "accounts": [
+        "Claude Code-credentials-aaaa1111",
+        "Claude Code-credentials-bbbb2222",
+      ],
     },
-    { "name": "reserve", "accounts": ["Claude Code-credentials"] }
-  ]
+    { "name": "reserve", "accounts": ["Claude Code-credentials"] },
+  ],
 }
 ```
 
@@ -166,14 +169,20 @@ arrives without a reset time gets a bounded ejection instead, backing off on
 each consecutive failure (`ejectFor`, default 5m).
 
 When every account in every tier is spent, the plugin stays put rather than
-thrashing, and the toast names the account that frees up first.
+thrashing — moving would only start a cold prompt cache on an account that will
+refuse the request too. That decision is recorded as `rotate_skipped_all_spent`
+in the debug log, naming the account that frees up first; the existing quota
+advisory toast is what surfaces it on screen.
+
+Rotation is evaluated after each response and after a refusal, so a spent
+account is noticed on the next request rather than while the session sits idle.
 
 Every automatic move raises a toast naming the new account, because the
 provider/model label is applied once when OpenCode loads its config and cannot
 be rewritten mid-session — without the toast the switch would be invisible.
 
 A rotation is deliberately **not** persisted. The file behind the switcher holds
-the account *you* chose; letting one OpenCode window's exhaustion rewrite it
+the account _you_ chose; letting one OpenCode window's exhaustion rewrite it
 would move every other window too, and would erase a pin you set on purpose.
 
 ## Troubleshooting

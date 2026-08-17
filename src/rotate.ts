@@ -24,17 +24,39 @@ import { getConfig } from "./config.ts"
 import { emitNotice } from "./notify.ts"
 import { log } from "./logger.ts"
 import {
+  type CredentialState,
   type Decision,
   clearEjection,
   eject,
   selectAccount,
 } from "./balancer.ts"
+import type { ClaudeAccount } from "./keychain.ts"
 import {
   type HeaderLike,
   parseQuotaHeaders,
   readQuotaCache,
   writeQuotaForAccount,
 } from "./quota.ts"
+
+/**
+ * Can this account's stored credentials serve a request?
+ *
+ * An account with generous headroom and a token that expired days ago is not a
+ * candidate just because its quota looks good — that was a real defect found by
+ * pointing the balancer at a live Keychain, where one entry had been expired for
+ * over two days and still assessed as healthy. A token with no expiry is a
+ * long-lived one and is taken at face value.
+ */
+export function credentialState(
+  account: ClaudeAccount,
+  nowMs: number = Date.now(),
+): CredentialState {
+  const creds = account.credentials
+  if (!creds?.accessToken) return "unusable"
+  if (creds.expiresAt === undefined) return "ok"
+  if (creds.expiresAt > nowMs) return "ok"
+  return creds.refreshToken ? "refreshable" : "unusable"
+}
 
 /**
  * Re-evaluate which account should serve requests, and move if the answer
@@ -54,7 +76,11 @@ export function maybeRotate(trigger: string): Decision | undefined {
 
     const active = getActiveAccount()?.source ?? null
     const decision = selectAccount(
-      accounts.map((a) => ({ source: a.source, label: a.label })),
+      accounts.map((a) => ({
+        source: a.source,
+        label: a.label,
+        credential: credentialState(a),
+      })),
       readQuotaCache(),
       cfg,
       active,

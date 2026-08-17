@@ -30,7 +30,21 @@ import {
   quotaForAccount,
 } from "./quota.ts"
 
-export type Member = { source: string; label?: string }
+/**
+ * Whether an account's stored credentials can serve a request.
+ *
+ * Quota is not the only way an account can be unusable: one can hold plenty of
+ * headroom and still have a token that expired days ago. `refreshable` is a
+ * candidate rather than a fault — the credential path recovers those — but it is
+ * ranked behind an account that needs no recovery at all.
+ */
+export type CredentialState = "ok" | "refreshable" | "unusable"
+
+export type Member = {
+  source: string
+  label?: string
+  credential?: CredentialState
+}
 
 export type Health = {
   source: string
@@ -38,6 +52,7 @@ export type Health = {
   utilization?: number
   /** Unix seconds the binding window resets, when known. */
   resetsAt?: number
+  credential: CredentialState
   healthy: boolean
   /** Why it is unhealthy, for the log. "" when healthy. */
   reason: string
@@ -136,10 +151,23 @@ export function assess(
   const maxAgeSeconds = Math.floor((cfg.quotaMaxAge ?? 0) / 1000) || undefined
 
   return members.map((m) => {
+    const credential = m.credential ?? "ok"
+
+    // Headroom is irrelevant if the account cannot authenticate at all.
+    if (credential === "unusable") {
+      return {
+        source: m.source,
+        credential,
+        healthy: false,
+        reason: "credentials expired and cannot be refreshed",
+      }
+    }
+
     const held = ejectedUntil(m.source, nowMs)
     if (held !== undefined) {
       return {
         source: m.source,
+        credential,
         healthy: false,
         reason: `ejected for ${Math.ceil((held - nowMs) / 1000)}s`,
       }
@@ -151,7 +179,7 @@ export function assess(
       // refusing it would strand a fresh install where nothing has been
       // measured yet — but `least-loaded` still ranks it behind any account
       // whose headroom is actually known.
-      return { source: m.source, healthy: true, reason: "" }
+      return { source: m.source, credential, healthy: true, reason: "" }
     }
 
     const w = windowFor(q, cfg.switchWindow)
@@ -162,6 +190,7 @@ export function assess(
         source: m.source,
         utilization: util,
         resetsAt: w.resetsAt,
+        credential,
         healthy: false,
         reason: "server rejected",
       }
@@ -171,6 +200,7 @@ export function assess(
         source: m.source,
         utilization: util,
         resetsAt: w?.resetsAt,
+        credential,
         healthy: false,
         reason: `at ${Math.round(util * 100)}% of ${cfg.switchWindow}`,
       }
@@ -179,6 +209,7 @@ export function assess(
       source: m.source,
       utilization: util,
       resetsAt: w?.resetsAt,
+      credential,
       healthy: true,
       reason: "",
     }
@@ -239,8 +270,20 @@ export function resetCursors(): void {
   swrrState.clear()
 }
 
-/** Known headroom first; an unmeasured account ranks behind every measured one. */
+/**
+ * Preference order: a credential that works, then known headroom.
+ *
+ * An account needing a token refresh is usable but not free — it costs a round
+ * trip and can still fail — so it loses to any account that is ready now, no
+ * matter how much emptier it looks.
+ */
+function credentialRank(h: Health): number {
+  return h.credential === "refreshable" ? 1 : 0
+}
+
 function byHeadroom(a: Health, b: Health): number {
+  const byCredential = credentialRank(a) - credentialRank(b)
+  if (byCredential !== 0) return byCredential
   const au = a.utilization
   const bu = b.utilization
   if (au === undefined && bu === undefined) return 0

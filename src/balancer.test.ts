@@ -115,6 +115,62 @@ describe("assess", () => {
   })
 })
 
+describe("credential health", () => {
+  it("refuses an account that cannot authenticate, however much headroom it has", () => {
+    const cache: QuotaCache = { a: reading(0.0) }
+    const [h] = assess(
+      [{ source: "a", credential: "unusable" }],
+      cache,
+      cfg(),
+      NOW_MS,
+    )
+    assert.equal(h!.healthy, false)
+    assert.match(h!.reason, /cannot be refreshed/)
+  })
+
+  it("treats a refreshable account as usable", () => {
+    const [h] = assess(
+      [{ source: "a", credential: "refreshable" }],
+      { a: reading(0.1) },
+      cfg(),
+      NOW_MS,
+    )
+    assert.equal(h!.healthy, true)
+  })
+
+  it("prefers a ready credential over an emptier one that needs refreshing", () => {
+    const pair: Member[] = [
+      { source: "ready", credential: "ok" },
+      { source: "stale", credential: "refreshable" },
+    ]
+    const cache: QuotaCache = { ready: reading(0.8), stale: reading(0.0) }
+    const d = selectAccount(
+      pair,
+      cache,
+      cfg({ strategy: "least-loaded" }),
+      null,
+      NOW_MS,
+    )
+    assert.equal(d!.source, "ready")
+  })
+
+  it("still uses a refreshable account when it is the only one left", () => {
+    const pair: Member[] = [
+      { source: "spent", credential: "ok" },
+      { source: "stale", credential: "refreshable" },
+    ]
+    const cache: QuotaCache = { spent: reading(1.0), stale: reading(0.5) }
+    const d = selectAccount(pair, cache, cfg(), "spent", NOW_MS)
+    assert.equal(d!.source, "stale")
+  })
+
+  it("defaults a member with no stated credential to usable", () => {
+    const [h] = assess(members("a"), { a: reading(0.1) }, cfg(), NOW_MS)
+    assert.equal(h!.credential, "ok")
+    assert.equal(h!.healthy, true)
+  })
+})
+
 describe("ejection", () => {
   it("backs off multiplicatively and forgets once served", () => {
     const c = cfg({ ejectFor: 1000 })

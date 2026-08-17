@@ -61,7 +61,8 @@
     "lint": "oxlint && oxfmt --check .",
     "lint:fix": "oxlint --fix . && oxfmt --write .",
     "format": "oxfmt --write .",
-    "prepublishOnly": "pnpm run build && pnpm test"
+    "prepublishOnly": "pnpm run build && pnpm test",
+    "test:rotation": "pnpm run build && node --experimental-strip-types scripts/test-rotation-headless.ts"
   },
   "devDependencies": {
     "@opencode-ai/plugin": "latest",

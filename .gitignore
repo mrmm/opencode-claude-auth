@@ -6,3 +6,6 @@ dist/
 .sisyphus/
 .opencode/
 docs/
+
+# derived knowledge graph — rebuild with `graphify update .`
+graphify-out/

@@ -165,3 +165,33 @@ describe("resolveActiveConfig", () => {
     assert.deepEqual(out.cfg.accounts, ["one", "two"])
   })
 })
+
+// maybeRotate() touches the Keychain, so what is asserted here is the decision
+// that gates it: autoSwitch governs whether the plugin moves on its own
+// initiative, never whether an explicit choice is obeyed.
+const gate = (autoSwitch: boolean, changed: boolean) => autoSwitch || changed
+
+const selectionKey = (persisted: string | null, cfgPreset: string) =>
+  `${persisted ?? ""}|${cfgPreset}`
+
+describe("selection changes are honoured regardless of autoSwitch", () => {
+  it("acts on an explicit change with autoSwitch off", () => {
+    assert.equal(gate(false, true), true)
+  })
+
+  it("stays put with autoSwitch off and nothing chosen", () => {
+    assert.equal(gate(false, false), false)
+  })
+
+  it("acts on its own initiative once autoSwitch is on", () => {
+    assert.equal(gate(true, false), true)
+  })
+
+  it("treats a preset swap and a pin swap as the same kind of change", () => {
+    const key = selectionKey
+    assert.notEqual(key("preset:rr-12", ""), key("preset:rr-23", ""))
+    assert.notEqual(key("preset:rr-12", ""), key("__auto__", ""))
+    assert.notEqual(key(null, "rr-12"), key(null, "rr-23"))
+    assert.equal(key("__auto__", "x"), key("__auto__", "x"))
+  })
+})

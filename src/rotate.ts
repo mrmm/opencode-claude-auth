@@ -115,13 +115,46 @@ export function credentialState(
  * throws: this runs on the credential path, where a bookkeeping failure must
  * not become a failed request.
  */
-export function maybeRotate(trigger: string): Decision | undefined {
+/**
+ * The selection currently in force, as a comparable key.
+ *
+ * Tracked so a *changed* selection is honoured even when `autoSwitch` is off.
+ * `autoSwitch` governs whether the plugin moves accounts on its own initiative;
+ * it must not also decide whether an explicit choice is obeyed, or picking a
+ * preset would silently do nothing.
+ */
+let lastSelection: string | null = null
+
+/** Test seam. */
+export function resetSelectionMemo(): void {
+  lastSelection = null
+}
+
+export function maybeRotate(
+  trigger: string,
+  opts: { force?: boolean } = {},
+): Decision | undefined {
   try {
-    const { cfg, preset } = resolveActiveConfig(
-      getConfig(),
-      loadPersistedAccountSource(),
-    )
-    if (!cfg.autoSwitch) return undefined
+    const persisted = loadPersistedAccountSource()
+    const raw = getConfig()
+    const { cfg, preset } = resolveActiveConfig(raw, persisted)
+
+    // Re-read on every call, so a selection changed from outside this process —
+    // by an edit to the config file, or by `overlord`-style CLI writing the
+    // state file — is picked up on the next request without an auth flow, and
+    // therefore without OpenCode re-initialising the provider and cancelling
+    // whatever the agent had in flight.
+    const selection = `${persisted ?? ""}|${raw.preset}`
+    const changed = lastSelection !== null && selection !== lastSelection
+    lastSelection = selection
+    if (changed) {
+      log("selection_changed", { trigger, selection, preset })
+    }
+
+    // `autoSwitch` decides only whether the plugin moves on its OWN initiative.
+    // An explicit selection — chosen now, or in force at start-up — is obeyed
+    // either way, otherwise picking a preset would appear to do nothing.
+    if (!cfg.autoSwitch && !changed && !opts.force) return undefined
 
     const accounts = listAccounts()
     if (accounts.length <= 1) return undefined

@@ -355,6 +355,13 @@ const plugin: PluginWithOptions = async (
 
   if (accounts.length > 0) {
     const persistedSource = loadPersistedAccountSource()
+    // Auto, a chosen preset, or a preset named in the config all mean "the
+    // strategy owns the choice" — so honour it at start-up rather than sitting
+    // on whichever account the Keychain happened to list first.
+    const managedSelection =
+      persistedSource === AUTO_SOURCE ||
+      persistedSource?.startsWith(PRESET_PREFIX) === true ||
+      getConfig().preset !== ""
     const autoMode = persistedSource === AUTO_SOURCE
     const defaultAccount =
       (!autoMode &&
@@ -369,12 +376,13 @@ const plugin: PluginWithOptions = async (
       sources: accounts.map((a) => a.source),
       activeSource: defaultAccount.source,
       autoMode,
+      managedSelection,
     })
 
     // With no pin, the first account is only a starting point — let the
     // configured strategy have the first word rather than defaulting to
     // whichever account the Keychain happened to list first.
-    if (autoMode) maybeRotate("startup")
+    if (managedSelection) maybeRotate("startup", { force: true })
 
     const initialCreds = getCachedCredentials()
     if (initialCreds) {
@@ -969,7 +977,9 @@ const plugin: PluginWithOptions = async (
               if (!getActiveAccount() && latestAccounts[0]) {
                 setActiveAccountSource(latestAccounts[0].source)
               }
-              maybeRotate(chosenPreset ? "switcher-preset" : "switcher-auto")
+              maybeRotate(chosenPreset ? "switcher-preset" : "switcher-auto", {
+                force: true,
+              })
 
               const active =
                 getActiveAccount() ?? latestAccounts[0] ?? accounts[0]

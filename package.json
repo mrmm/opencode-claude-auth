@@ -63,7 +63,8 @@
     "format": "oxfmt --write .",
     "prepublishOnly": "pnpm run build && pnpm test",
     "test:rotation": "pnpm run build && node --experimental-strip-types scripts/test-rotation-headless.ts",
-    "usage": "pnpm run build && node --experimental-strip-types scripts/usage-report.ts"
+    "usage": "pnpm run build && node --experimental-strip-types scripts/usage-report.ts",
+    "lb": "pnpm run build && node --experimental-strip-types scripts/lb.ts"
   },
   "devDependencies": {
     "@opencode-ai/plugin": "latest",

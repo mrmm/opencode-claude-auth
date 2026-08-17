@@ -175,6 +175,36 @@ subset, in preference order. Account names are Keychain sources — the values
 `opencode auth login` shows, listable with
 `security dump-keychain | grep 'Claude Code'`.
 
+### Switching without interrupting the agent
+
+Rotation is invisible to the agent by construction: the access token is resolved
+per request inside the plugin's own `fetch`, so changing the active account
+changes who serves the next call. Nothing is re-registered, no request is
+cancelled, and neither the agent nor its subagents observe anything.
+
+Choosing an account **through `opencode auth login` is different**, and is the
+wrong door while work is in flight. Selecting there runs the auth hook's
+`authorize()`; OpenCode re-initialises the provider, and anything running —
+subagents included — is cancelled. Use the switcher when idle.
+
+To change the selection mid-task, write the selection instead:
+
+```bash
+pnpm lb                 # what is selected, which presets and accounts exist
+pnpm lb rr-12           # use a preset
+pnpm lb "Team B"      # pin one account (label fragment or exact source)
+pnpm lb auto            # balance, no pin
+pnpm lb clear           # forget it; the config decides again
+```
+
+A running OpenCode re-reads the selection on its next request. Editing
+`"preset"` in `claude-auth.jsonc` has the same effect, picked up within
+`configReloadInterval`.
+
+`autoSwitch` governs only whether the plugin moves on its **own** initiative
+(threshold or refusal). An explicit selection is obeyed either way — otherwise
+choosing a preset with `autoSwitch: false` would appear to do nothing.
+
 ### Presets
 
 A preset is a named arrangement — which accounts, in what order, under which

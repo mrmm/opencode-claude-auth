@@ -752,6 +752,21 @@ const plugin: PluginWithOptions = async (
             // Get excluded betas for this model (from previous failed requests)
             const excluded = getExcludedBetas(modelId)
             const requestUrl = buildRequestUrl(input)
+            // Every request through this fetch, by endpoint. Its absence was a
+            // real blind spot: a request to anything other than /v1/messages was
+            // indistinguishable in the log from a chat turn, because the only
+            // identifier recorded came from parsing a chat body.
+            const requestPath = (() => {
+              try {
+                return new URL(requestUrl).pathname
+              } catch {
+                return String(requestUrl)
+              }
+            })()
+            log("fetch_request", {
+              path: requestPath,
+              method: (init?.method ?? "POST").toUpperCase(),
+            })
             const headers = buildRequestHeaders(
               input,
               requestInit,
@@ -985,7 +1000,16 @@ const plugin: PluginWithOptions = async (
               maybeRotate("quota-observed")
             }
 
-            return preserveResponseUnchanged
+            // transformResponseStream rewrites a server-sent-event chat stream.
+            // Anything else — a model list, a token endpoint, a count call — is
+            // JSON, and feeding it through an SSE transform can only corrupt it.
+            // It was applied to every response regardless of endpoint, which is
+            // a latent fault whether or not it explains a given symptom.
+            const isChatStream = requestPath.endsWith("/messages")
+            if (!isChatStream) {
+              log("fetch_untransformed", { path: requestPath })
+            }
+            return preserveResponseUnchanged || !isChatStream
               ? response
               : transformResponseStream(response)
           },

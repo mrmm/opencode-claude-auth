@@ -403,7 +403,7 @@ const plugin: PluginWithOptions = async (
     // access token at all — starting there meant every init flipped the active
     // account back to it, the label advertised it, and any request landing
     // before the startup rotation had no credentials. That is the blank screen:
-    // observed as account_switch cccc3333 -> CCc immediately after a successful
+    // observed as a switch back to the dead entry immediately after a successful
     // rotation, once per plugin init, and the plugin inits more than once.
     const usable = accounts.filter((a) => credentialState(a) !== "unusable")
     const defaultAccount =

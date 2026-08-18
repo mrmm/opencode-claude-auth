@@ -39,8 +39,7 @@ export type AdvisoryAccount = { source: string; label: string }
 
 /**
  * Drop the shared prefix so a toast reads as the part that distinguishes the
- * account: "Claude Team - Team A" -> "Team A - Wings of
- * Freedom". Labels that do not carry the prefix are left alone.
+ * account: "Claude Team - Team A" -> "Team A - Team A". Labels that do not carry the prefix are left alone.
  */
 export function shortenLabel(label: string): string {
   return (

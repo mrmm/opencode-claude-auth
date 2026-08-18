@@ -204,6 +204,17 @@ export function noticeToToast(
         message: `${shortenLabel(notice.fromSource)} ${notice.reason} — now on ${shortenLabel(notice.toSource)} (${notice.strategy}, ${notice.pool}).`,
       }
 
+    case "selection-changed":
+      // Always shown. The provider name in the status line is written once at
+      // config load and cannot be rewritten mid-session, so without this a
+      // change made by `pnpm lb` or claude_auth_select is invisible until the
+      // next restart — the status line would still advertise the old one.
+      return {
+        variant: "info",
+        title: "Claude account selection changed",
+        message: `${notice.what} — now on ${shortenLabel(notice.nowOn)}. The status line updates on the next restart.`,
+      }
+
     case "accounts-exhausted": {
       // Previously this state was log-only: every account spent and the screen
       // said nothing, which reads as the plugin having simply stopped.
@@ -242,6 +253,10 @@ export function noticeKey(notice: Notice): string {
       return `failed:${notice.source}`
     case "account-switched":
       return `switched:${notice.failedSource}->${notice.usedSource}`
+    case "selection-changed":
+      // Keyed on the selection, so each distinct change speaks even if another
+      // came minutes earlier; the cooldown only suppresses the identical one.
+      return `selection:${notice.what}`
     case "accounts-exhausted":
       // Keyed on the reset, so one message per exhaustion rather than per request.
       return `exhausted:${notice.resetsAt ?? 0}`

@@ -54,6 +54,18 @@ export type Notice =
       /** Unix seconds it frees up, when known. */
       resetsAt?: number
     }
+  | {
+      /**
+       * The selection changed — a different preset, Auto, or a pinned account.
+       * Distinct from account-rotated, which reports the balancer moving within
+       * an arrangement; this is the arrangement itself being swapped.
+       */
+      kind: "selection-changed"
+      /** Already human-readable, e.g. "LB: round-robin Team 1,2,3". */
+      what: string
+      /** The account serving immediately after the change. */
+      nowOn: string
+    }
 
 export type NoticeSink = (notice: Notice) => void
 

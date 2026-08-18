@@ -17,6 +17,7 @@ import {
   SESSION_HEADER,
   assess,
   credentialState,
+  describeSelection,
   pickStartupAccount,
   recordRequest,
   resolveSessionCredentials,
@@ -335,20 +336,15 @@ const plugin: PluginWithOptions = async (
       // selected, which is exactly what a fixed string can honestly claim.
       const cfg = getConfig()
       const persisted = loadPersistedAccountSource()
-      if (persisted === AUTO_SOURCE) {
-        return `LB: balancing, ${cfg.strategy}`
-      }
-      if (persisted?.startsWith(PRESET_PREFIX)) {
-        const name = persisted.slice(PRESET_PREFIX.length)
-        const preset = cfg.presets[name]
-        const text = preset?.label ?? name
-        // Presets are commonly named "LB round-robin ..." already; the marker
-        // must not stutter.
-        return `LB: ${text.replace(/^LB\s+/i, "")}`
-      }
-
-      // A pin names one account, so the account is the honest label.
       const active = getActiveAccount()
+      if (
+        persisted === AUTO_SOURCE ||
+        persisted?.startsWith(PRESET_PREFIX) ||
+        (!persisted && cfg.preset)
+      ) {
+        // Same wording as the toast, from one function, so the two cannot drift.
+        return describeSelection(cfg, persisted)
+      }
       if (active) return active.label ?? ""
 
       const current = refreshAccountsList()

@@ -4,6 +4,7 @@ import { describe, it } from "node:test"
 import { DEFAULT_CONFIG, type ClaudeAuthConfig } from "../config.ts"
 import {
   credentialState,
+  describeSelection,
   pickStartupAccount,
   resolveActiveConfig,
 } from "./rotate.ts"
@@ -285,5 +286,61 @@ describe("which accounts are worth offering", () => {
       true,
       "one usable account needs no switcher",
     )
+  })
+})
+
+describe("describeSelection", () => {
+  const withPresets = cfg({
+    presets: {
+      "rr-123": {
+        label: "LB round-robin Team 1,2,3",
+        accounts: ["a", "b", "c"],
+      },
+      bare: { accounts: ["a"] },
+    },
+    strategy: "least-loaded",
+  })
+
+  it("names the arrangement when a preset is selected", () => {
+    assert.equal(
+      describeSelection(withPresets, "preset:rr-123"),
+      "LB: round-robin Team 1,2,3",
+    )
+  })
+
+  it("does not stutter when the preset label already says LB", () => {
+    // "LB: LB round-robin ..." is what a naive prefix produced.
+    assert.ok(
+      !describeSelection(withPresets, "preset:rr-123").includes("LB: LB"),
+    )
+  })
+
+  it("falls back to the preset key when it has no label", () => {
+    assert.equal(describeSelection(withPresets, "preset:bare"), "LB: bare")
+  })
+
+  it("names the strategy for auto", () => {
+    assert.equal(
+      describeSelection(withPresets, "__auto__"),
+      "LB: balancing, least-loaded",
+    )
+  })
+
+  it("names the account for a pin, since a pin names an account", () => {
+    assert.equal(
+      describeSelection(withPresets, "some-source", "Team B"),
+      "Team B",
+    )
+  })
+
+  it("honours a preset configured rather than selected", () => {
+    assert.equal(
+      describeSelection(cfg({ ...withPresets, preset: "rr-123" }), null),
+      "LB: round-robin Team 1,2,3",
+    )
+  })
+
+  it("says something usable when a pin has no label to offer", () => {
+    assert.equal(describeSelection(withPresets, "some-source"), "one account")
   })
 })

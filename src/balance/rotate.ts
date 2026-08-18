@@ -109,6 +109,32 @@ export function resolveActiveConfig(
   }
 }
 
+/**
+ * How the current selection reads, in the same words the status line uses.
+ *
+ * Shared so a toast and the provider label cannot describe the same state
+ * differently — the toast exists precisely because the label cannot be rewritten
+ * mid-session, and two descriptions of one thing would defeat the point.
+ */
+export function describeSelection(
+  cfg: ClaudeAuthConfig,
+  persisted: string | null,
+  /** The pinned account's label. A pin names an account, so name it. */
+  pinnedLabel?: string,
+): string {
+  if (persisted === AUTO_SOURCE) return `LB: balancing, ${cfg.strategy}`
+  if (persisted?.startsWith(PRESET_PREFIX)) {
+    const name = persisted.slice(PRESET_PREFIX.length)
+    const text = cfg.presets[name]?.label ?? name
+    return `LB: ${text.replace(/^LB\s+/i, "")}`
+  }
+  if (cfg.preset) {
+    const text = cfg.presets[cfg.preset]?.label ?? cfg.preset
+    return `LB: ${text.replace(/^LB\s+/i, "")}`
+  }
+  return pinnedLabel ?? "one account"
+}
+
 /** The preset in force, or null. */
 export function activePreset(): string | null {
   return resolveActiveConfig(getConfig(), loadPersistedAccountSource()).preset
@@ -176,6 +202,18 @@ export function maybeRotate(
     lastSelection = selection
     if (changed) {
       log("selection_changed", { trigger, selection, preset })
+      // The status line cannot be rewritten mid-session, so without this a
+      // change made by `pnpm lb` or claude_auth_select is invisible: the label
+      // would keep advertising the arrangement that was in force at start-up.
+      emitNotice({
+        kind: "selection-changed",
+        what: describeSelection(
+          raw,
+          persisted,
+          getActiveAccount()?.label ?? undefined,
+        ),
+        nowOn: getActiveAccount()?.label ?? "an account",
+      })
     }
 
     // `autoSwitch` decides only whether the plugin moves on its OWN initiative.

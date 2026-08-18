@@ -65,7 +65,8 @@
     "test:rotation": "pnpm run build && node --experimental-strip-types scripts/test-rotation-headless.ts",
     "usage": "pnpm run build && node --experimental-strip-types scripts/usage-report.ts",
     "lb": "pnpm run build && node --experimental-strip-types scripts/lb.ts",
-    "check:structure": "node --experimental-strip-types scripts/check-structure.ts"
+    "check:structure": "node --experimental-strip-types scripts/check-structure.ts",
+    "capture": "node --experimental-strip-types scripts/capture.ts"
   },
   "devDependencies": {
     "@opencode-ai/plugin": "latest",

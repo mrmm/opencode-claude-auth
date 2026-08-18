@@ -598,9 +598,16 @@ const plugin: PluginWithOptions = async (
     // custom fetch below cannot otherwise know which session a request belongs
     // to — the provider is registered once, for all of them.
     "chat.headers": async (input, output) => {
-      if (getConfig().bindBy === "session") {
+      const bind = getConfig().bindBy === "session"
+      if (bind) {
         output.headers[SESSION_HEADER] = input.sessionID
       }
+      log("chat_headers", {
+        sessionID: input.sessionID,
+        agent: input.agent,
+        model: input.model?.id ?? null,
+        stamped: bind,
+      })
     },
 
     config: async (opencodeConfig) => {
@@ -1033,6 +1040,10 @@ const plugin: PluginWithOptions = async (
 
           async authorize(inputs) {
             const latestAccounts = refreshAccountsList()
+            log("authorize_called", {
+              requested: inputs?.account ?? null,
+              accountCount: latestAccounts.length,
+            })
 
             // A preset and Auto differ only in which accounts are eligible, so
             // they share one path: persist the choice, let the strategy pick now.
@@ -1061,6 +1072,14 @@ const plugin: PluginWithOptions = async (
               const how = chosenPreset
                 ? (cfgNow.presets[chosenPreset]?.strategy ?? cfgNow.strategy)
                 : cfgNow.strategy
+
+              log("authorize_returning", {
+                mode: chosenPreset ? "preset" : "auto",
+                preset: chosenPreset,
+                active: active.source,
+                hasAccess: !!creds.accessToken,
+                expiresAt: creds.expiresAt ?? null,
+              })
 
               return {
                 url: "",

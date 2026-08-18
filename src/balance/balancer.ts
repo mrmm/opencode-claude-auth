@@ -80,11 +80,19 @@ export function eject(
   source: string,
   cfg: Pick<ClaudeAuthConfig, "ejectFor">,
   nowMs: number = Date.now(),
+  /**
+   * The server's own `retry-after`, when it sent one. Preferred over the backoff
+   * because it states when traffic will be accepted again instead of guessing —
+   * but still floored by the backoff, so a repeatedly failing account is not
+   * retried every few seconds because it keeps asking to be.
+   */
+  retryAfterMs?: number,
 ): Ejection {
   const prev = ejections.get(source)
   const count = (prev?.count ?? 0) + 1
   const base = cfg.ejectFor > 0 ? cfg.ejectFor : 0
-  const until = nowMs + Math.min(base * count, 60 * 60_000)
+  const backoff = Math.min(base * count, 60 * 60_000)
+  const until = nowMs + Math.max(backoff, retryAfterMs ?? 0)
   const next = { until, count }
   ejections.set(source, next)
   return next

@@ -539,3 +539,23 @@ describe("account references", () => {
     assert.deepEqual(pools[0]!.accounts, ["s2"])
   })
 })
+
+describe("ejection honours the server's retry-after", () => {
+  it("uses retry-after when it is longer than the backoff", () => {
+    const e = eject("a", cfg({ ejectFor: 1000 }), NOW_MS, 30_000)
+    assert.equal(e.until, NOW_MS + 30_000)
+  })
+
+  it("keeps the backoff when retry-after is shorter", () => {
+    // A repeatedly failing account must not be retried every few seconds just
+    // because it keeps asking to be.
+    eject("a", cfg({ ejectFor: 10_000 }), NOW_MS)
+    const second = eject("a", cfg({ ejectFor: 10_000 }), NOW_MS, 1000)
+    assert.equal(second.until, NOW_MS + 20_000)
+  })
+
+  it("ignores a nonsensical retry-after", () => {
+    const e = eject("a", cfg({ ejectFor: 5000 }), NOW_MS, 0)
+    assert.equal(e.until, NOW_MS + 5000)
+  })
+})

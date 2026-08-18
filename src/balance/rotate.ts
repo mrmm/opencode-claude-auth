@@ -293,11 +293,16 @@ function reasonForPrevious(source: string, trigger: string): string {
 /**
  * Record a refusal against `source` and rotate away from it.
  *
- * A 429 carries the unified rate-limit headers, including the reset epoch, so
- * the refusal usually dates itself and health follows from the quota cache with
- * nothing extra stored. The bounded ejection is the fallback for a refusal that
- * arrives without a usable reset time — otherwise the account would look
- * healthy again the instant the response was forgotten.
+ * Usually the rate-limit headers explain the refusal — a window at its limit,
+ * with a reset epoch — and health then follows from the quota cache with nothing
+ * extra stored.
+ *
+ * But a refusal can also arrive that the headers call `allowed`. A monthly spend
+ * cap does exactly this: observed live as `status=allowed 5h=37%` alongside a
+ * 429 reading "would exceed your account's monthly spend limit". Trusting the
+ * headers there leaves the account looking perfectly usable, so the balancer
+ * picks it again, and again. When the headers and the response disagree, the
+ * response is what actually happened: eject the account explicitly.
  */
 export function noteRejection(
   source: string | null,
@@ -308,23 +313,48 @@ export function noteRejection(
   if (!source) return undefined
 
   let dated = false
+  let explained = false
+
   try {
     const quota = parseQuotaHeaders(headers)
     if (quota) {
       writeQuotaForAccount(source, quota)
       dated =
         (quota.fiveHour?.resetsAt ?? quota.sevenDay?.resetsAt) !== undefined
+
+      // Do the headers account for the refusal? A window out of room, or the
+      // server saying `rejected`, explains it. Anything else means the limit
+      // that bit is one these headers do not describe.
+      const windows = [quota.fiveHour, quota.sevenDay].filter(
+        (w): w is NonNullable<typeof w> => w !== undefined,
+      )
+      explained = windows.some(
+        (w) => w.status === "rejected" || w.utilization >= cfg.switchAt,
+      )
     }
   } catch {
-    // fall through to the untimed ejection
+    // fall through to an untimed ejection
   }
 
-  if (!dated) {
-    const e = eject(source, cfg)
-    log("rotate_ejected_undated", {
+  let retryAfterMs: number | undefined
+  const raw = headers.get?.("retry-after")
+  if (raw) {
+    const secs = Number.parseFloat(raw)
+    if (Number.isFinite(secs) && secs > 0) retryAfterMs = secs * 1000
+  }
+
+  if (!dated || !explained) {
+    // Prefer the server's own retry-after over our backoff: it knows when it
+    // will accept traffic again, and we would be guessing.
+    const e = eject(source, cfg, Date.now(), retryAfterMs)
+    log("rotate_ejected", {
       source,
       untilMs: e.until,
       consecutive: e.count,
+      reason: explained
+        ? "refusal carried no reset time"
+        : "refused while the headers reported room — a limit they do not describe",
+      retryAfterMs: retryAfterMs ?? null,
     })
   }
 

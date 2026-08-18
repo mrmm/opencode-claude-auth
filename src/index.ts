@@ -327,12 +327,27 @@ const plugin: PluginWithOptions = async (
    */
   function activeAccountLabel(): string {
     try {
-      // Ask which account is actually active rather than re-deriving it from
-      // the selection file. That file may hold `__auto__` or `preset:<name>`,
-      // neither of which is an account source, so matching it against the
-      // account list found nothing and fell through to the first entry — which
-      // here holds no access token. The label then advertised an account that
-      // could not serve a single request, while a different one served them all.
+      // With balancing on there is no single account to name. The label is
+      // written once, in the config hook, and cannot be rewritten mid-session —
+      // so naming one account is a snapshot that goes stale on the first
+      // rotation, and with per-session binding it is wrong for every session but
+      // one. Name the arrangement instead: that stays true for as long as it is
+      // selected, which is exactly what a fixed string can honestly claim.
+      const cfg = getConfig()
+      const persisted = loadPersistedAccountSource()
+      if (persisted === AUTO_SOURCE) {
+        return `LB: balancing, ${cfg.strategy}`
+      }
+      if (persisted?.startsWith(PRESET_PREFIX)) {
+        const name = persisted.slice(PRESET_PREFIX.length)
+        const preset = cfg.presets[name]
+        const text = preset?.label ?? name
+        // Presets are commonly named "LB round-robin ..." already; the marker
+        // must not stutter.
+        return `LB: ${text.replace(/^LB\s+/i, "")}`
+      }
+
+      // A pin names one account, so the account is the honest label.
       const active = getActiveAccount()
       if (active) return active.label ?? ""
 

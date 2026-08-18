@@ -195,3 +195,38 @@ describe("applyAccountLabelToConfig", () => {
     assert.equal(ps.anthropic, undefined)
   })
 })
+
+describe("markers never accumulate", () => {
+  // Introduced and caught in the same change: adding an "LB:" marker while the
+  // suffix matcher still only knew "acct:" made the two stack instead of
+  // replacing, growing the provider name on every config load.
+  it("replaces one marker with another, whatever the kind", () => {
+    let name = "Anthropic"
+    for (const label of [
+      "LB: round-robin Team 1,2,3",
+      "LB: round-robin Team 1,2,3",
+      "Claude Team - Team B",
+      "LB: balancing, sticky",
+      "Claude Team - Team C",
+    ]) {
+      name = decorateName(name, label)
+    }
+    assert.equal(name, "Anthropic (acct: Claude Team - Team C)")
+    assert.equal(name.match(/\(/g)?.length, 1, "exactly one marker may remain")
+  })
+
+  it("does not grow when the same label is applied repeatedly", () => {
+    let name = "Anthropic"
+    for (let i = 0; i < 25; i++)
+      name = decorateName(name, "LB: balancing, sticky")
+    assert.equal(name, "Anthropic (LB: balancing, sticky)")
+  })
+
+  it("leaves parentheses that are part of the name itself alone", () => {
+    // Only our own marker is replaceable; a model called "Opus (latest)" keeps it.
+    assert.equal(
+      decorateName("Claude Opus 4.5 (latest)", "LB: balancing, sticky"),
+      "Claude Opus 4.5 (latest) (LB: balancing, sticky)",
+    )
+  })
+})

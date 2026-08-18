@@ -35,7 +35,9 @@ export function isAccountLabelPlacement(
  */
 const MARKER = "acct: "
 
-const LABEL_SUFFIX = /\s\(acct: [^()]*\)$/
+// Must match every marker this module can write. When it only knew "acct:",
+// adding an "LB:" marker made the two accumulate instead of replacing.
+const LABEL_SUFFIX = /\s\((?:acct|LB): [^()]*\)$/
 
 /**
  * Append `label` to `name` as a marked, parenthesised suffix.
@@ -51,7 +53,12 @@ export function decorateName(name: string, label: string): string {
   const trimmed = typeof label === "string" ? label.trim() : ""
   if (!trimmed) return name
 
-  const suffix = ` (${MARKER}${trimmed})`
+  // A caller may supply its own marker ("LB: ..."), because what is being named
+  // is not always an account: with balancing on there is no single account, and
+  // labelling an arrangement "acct:" would be a small lie in the one place the
+  // user looks to see what is serving them.
+  const carriesMarker = /^[a-z]+:\s/i.test(trimmed)
+  const suffix = carriesMarker ? ` (${trimmed})` : ` (${MARKER}${trimmed})`
   if (name.endsWith(suffix)) return name
 
   // A different label was applied earlier -- the user switched accounts. Replace

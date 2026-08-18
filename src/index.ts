@@ -15,6 +15,7 @@ import {
   quotaForAccount,
   readQuotaCache,
   SESSION_HEADER,
+  assess,
   credentialState,
   pickStartupAccount,
   recordRequest,
@@ -413,10 +414,31 @@ const plugin: PluginWithOptions = async (
       skippedUnusable: accounts.length - usable.length,
     })
 
-    // With no pin, the first account is only a starting point — let the
-    // configured strategy have the first word rather than defaulting to
-    // whichever account the Keychain happened to list first.
-    if (managedSelection) maybeRotate("startup", { force: true })
+    // Start-up's job is a *valid* account, not a balancing decision. It used to
+    // force a rotation on every init, which with a rotating strategy advanced
+    // the cursor each time: three inits in thirteen seconds left the active
+    // account oscillating between two accounts while OpenCode was constructing
+    // the provider. Balancing still happens where it belongs — per session, and
+    // whenever a response reports quota — so this only steps in when the account
+    // chosen above cannot actually serve.
+    const startupHealth = assess(
+      [
+        {
+          source: defaultAccount.source,
+          label: defaultAccount.label,
+          credential: credentialState(defaultAccount),
+        },
+      ],
+      readQuotaCache(),
+      getConfig(),
+    )[0]
+    if (managedSelection && startupHealth && !startupHealth.healthy) {
+      log("startup_rotating_off_unusable", {
+        source: defaultAccount.source,
+        reason: startupHealth.reason,
+      })
+      maybeRotate("startup", { force: true })
+    }
 
     const initialCreds = getCachedCredentials()
     if (initialCreds) {

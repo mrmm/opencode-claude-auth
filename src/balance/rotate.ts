@@ -17,11 +17,9 @@ import {
   AUTO_SOURCE,
   PRESET_PREFIX,
   getActiveAccount,
-  getCachedCredentials,
   listAccounts,
   loadPersistedAccountSource,
   setActiveAccountSource,
-  syncAuthJson,
 } from "../credentials.ts"
 import { type ClaudeAuthConfig, getConfig } from "../config.ts"
 import { emitNotice } from "../notify.ts"
@@ -248,8 +246,15 @@ export function maybeRotate(
     // this process's runtime decision — persisting it would let one OpenCode
     // window's exhaustion silently move every future window, and would erase a
     // pin the user set on purpose.
-    const creds = getCachedCredentials()
-    if (creds) syncAuthJson(creds)
+    //
+    // Deliberately NOT syncAuthJson() either. That file is OpenCode's own
+    // credential store, read while it constructs the provider. Rewriting it on
+    // every rotation meant authorize() handed OpenCode one account's tokens and
+    // a rotation replaced them microseconds later — five rewrites in thirteen
+    // seconds, flip-flopping between accounts, observed while the provider was
+    // being rebuilt after Provider Connect. Nothing needs it: the token is
+    // resolved per request inside this plugin's own fetch, so the active
+    // account is honoured without OpenCode's copy changing at all.
 
     log("rotate_applied", {
       trigger,

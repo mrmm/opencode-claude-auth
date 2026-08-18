@@ -253,14 +253,14 @@ describe("pickStartupAccount", () => {
   })
 })
 
-describe("which accounts are worth offering", () => {
-  // The switcher filters on exactly this predicate, so it is asserted here
-  // rather than through the auth hook, which cannot be exercised in a unit test.
-  const offerable = <T>(accounts: readonly T[], usable: (a: T) => boolean) => {
-    const ok = accounts.filter(usable)
-    return ok.length > 0 ? ok : accounts
-  }
+// The switcher filters on exactly this predicate, so it is asserted here rather
+// than through the auth hook, which cannot be exercised in a unit test.
+const offerable = <T>(accounts: readonly T[], usable: (a: T) => boolean) => {
+  const ok = accounts.filter(usable)
+  return ok.length > 0 ? ok : accounts
+}
 
+describe("which accounts are worth offering", () => {
   it("hides entries that hold no credentials", () => {
     // The live shape: two config dirs nobody logs into, three real accounts.
     const all = ["dead1", "dead2", "p1", "p2", "p3"]

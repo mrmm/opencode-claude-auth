@@ -43,7 +43,43 @@ export function setActiveAccountSource(source: string): void {
   accountCacheMap.delete(source)
   resetExcludedBetas()
   if (previous && previous !== source) {
-    log("account_switch", { newSource: source, previousSource: previous })
+    // Who switched, not just that a switch happened. Several paths can move the
+    // active account — start-up, the balancer, the switcher, a refresh fallback
+    // — and a log that names only the accounts cannot tell an intended rotation
+    // apart from one path undoing another's work.
+    log("account_switch", {
+      newSource: source,
+      previousSource: previous,
+      by: callerFrames(),
+    })
+  }
+}
+
+/**
+ * The nearest few frames of our own code, for attributing a switch.
+ *
+ * Diagnostic only: a stack is captured but never thrown, node paths and the
+ * frames belonging to this helper are dropped, and the result is three short
+ * names rather than a wall of text.
+ */
+function callerFrames(): string {
+  try {
+    const raw = new Error().stack ?? ""
+    return raw
+      .split("\n")
+      .slice(2)
+      .map((l) => l.trim())
+      .filter((l) => l.startsWith("at ") && !l.includes("node:"))
+      .slice(0, 3)
+      .map((l) =>
+        l
+          .replace(/^at\s+/, "")
+          .replace(/\s*\(.*\)$/, "")
+          .replace(/.*[\\/]/, ""),
+      )
+      .join(" < ")
+  } catch {
+    return "unknown"
   }
 }
 

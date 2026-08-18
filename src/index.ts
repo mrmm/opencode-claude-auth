@@ -1059,7 +1059,6 @@ const plugin: PluginWithOptions = async (
             // Values shown come from the cache; this refreshes it for the next
             // open. The getter cannot await, so it cannot show its own result.
             topUpQuota("switcher-open")
-            const cfgNow = getConfig()
 
             // An account holding no usable credentials is not a choice — it is
             // an entry for a config directory nobody logs into. Offering it
@@ -1080,56 +1079,37 @@ const plugin: PluginWithOptions = async (
               })
             }
 
-            const autoRow: { label: string; value: string; hint?: string } = {
-              label: `Auto — balance across accounts (${cfgNow.strategy})`,
-              value: AUTO_SOURCE,
-            }
-            if (currentSource === AUTO_SOURCE) autoRow.hint = "active"
-
-            // Presets first: an arrangement is usually what you want to switch
-            // to, and picking one account out of several is the exception once
-            // more than one is in play.
-            const presetRows = Object.entries(cfgNow.presets).map(
-              ([name, preset]) => {
-                const value = `${PRESET_PREFIX}${name}`
-                const count = preset.pools
-                  ? preset.pools.reduce((n, p) => n + p.accounts.length, 0)
-                  : (preset.accounts?.length ?? 0)
-                const row: { label: string; value: string; hint?: string } = {
-                  label: `${preset.label ?? name} — ${preset.strategy ?? cfgNow.strategy} over ${count}`,
-                  value,
-                }
-                if (currentSource === value) row.hint = "active"
-                return row
-              },
-            )
+            // Presets and Auto are deliberately NOT offered in this switcher.
+            // Every choice here ends in authorize(), and OpenCode disposes the
+            // whole instance ten milliseconds after a successful one — measured,
+            // session gone, screen blank. A preset needs none of that: it is a
+            // file write, which `pnpm lb <preset>` and claude_auth_select do
+            // without disturbing anything. Offering them here made the
+            // destructive path the obvious one.
 
             return [
               {
                 type: "select" as const,
                 key: "account",
-                message: "Select which Claude Code account to use:",
+                message:
+                  "Select a Claude Code account (restarts the session — use `pnpm lb` or claude_auth_select to switch without one):",
                 // `hint` must be a string when present. Passing undefined fails
                 // OpenCode's schema validation for the whole request --
                 // /provider/auth answers 500, the TUI falls back to its built-in
                 // "API key" prompt, and every account becomes unreachable. Omit
                 // the key instead of setting it to undefined.
-                options: [
-                  ...presetRows,
-                  autoRow,
-                  ...selectableAccounts.map((a) => {
-                    const option: {
-                      label: string
-                      value: string
-                      hint?: string
-                    } = {
-                      label: prefixWithQuota(a.label, a.source, quotaCache),
-                      value: a.source,
-                    }
-                    if (a.source === currentSource) option.hint = "active"
-                    return option
-                  }),
-                ],
+                options: selectableAccounts.map((a) => {
+                  const option: {
+                    label: string
+                    value: string
+                    hint?: string
+                  } = {
+                    label: prefixWithQuota(a.label, a.source, quotaCache),
+                    value: a.source,
+                  }
+                  if (a.source === currentSource) option.hint = "active"
+                  return option
+                }),
               },
             ]
           },
@@ -1152,9 +1132,12 @@ const plugin: PluginWithOptions = async (
               if (!getActiveAccount() && latestAccounts[0]) {
                 setActiveAccountSource(latestAccounts[0].source)
               }
-              maybeRotate(chosenPreset ? "switcher-preset" : "switcher-auto", {
-                force: true,
-              })
+              // Deliberately NOT rotating here. Rotating mid-authorize changed
+              // the account between the request and the response, so the tokens
+              // handed back were a different account's than the flow began with,
+              // and it put a second writer on auth.json in the same millisecond
+              // OpenCode was reading it. The selection is persisted above; the
+              // strategy applies on the next request, per session, as designed.
 
               const active =
                 getActiveAccount() ?? latestAccounts[0] ?? accounts[0]

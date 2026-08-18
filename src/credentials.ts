@@ -191,12 +191,28 @@ function syncToPath(authPath: string, creds: ClaudeCredentials): void {
       }
     }
   }
-  auth.anthropic = {
+  const next = {
     type: "oauth",
     access: creds.accessToken,
     refresh: creds.refreshToken,
     expires: creds.expiresAt,
   }
+
+  // Write only when something actually changed. OpenCode owns this file — its
+  // Auth.set is the real writer and it reads on demand — so mirroring identical
+  // bytes is pure churn against a file it is reading while it builds providers.
+  const current = auth.anthropic as Record<string, unknown> | undefined
+  if (
+    current &&
+    current.type === next.type &&
+    current.access === next.access &&
+    current.refresh === next.refresh &&
+    current.expires === next.expires
+  ) {
+    return
+  }
+
+  auth.anthropic = next
   const dir = dirname(authPath)
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true, mode: 0o700 })

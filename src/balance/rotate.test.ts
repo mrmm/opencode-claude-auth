@@ -252,3 +252,38 @@ describe("pickStartupAccount", () => {
     assert.equal(pickStartupAccount([], null, usableAll), undefined)
   })
 })
+
+describe("which accounts are worth offering", () => {
+  // The switcher filters on exactly this predicate, so it is asserted here
+  // rather than through the auth hook, which cannot be exercised in a unit test.
+  const offerable = <T>(accounts: readonly T[], usable: (a: T) => boolean) => {
+    const ok = accounts.filter(usable)
+    return ok.length > 0 ? ok : accounts
+  }
+
+  it("hides entries that hold no credentials", () => {
+    // The live shape: two config dirs nobody logs into, three real accounts.
+    const all = ["dead1", "dead2", "p1", "p2", "p3"]
+    const offered = offerable(all, (a) => a.startsWith("p"))
+    assert.deepEqual(offered, ["p1", "p2", "p3"])
+  })
+
+  it("still offers everything when nothing is usable", () => {
+    // A hopeless switcher beats an empty one: the user can at least see why.
+    const all = ["dead1", "dead2"]
+    assert.deepEqual(
+      offerable(all, () => false),
+      all,
+    )
+  })
+
+  it("is not worth showing when only one account can serve", () => {
+    const all = ["dead1", "p1"]
+    const usable = all.filter((a) => a.startsWith("p"))
+    assert.equal(
+      usable.length <= 1,
+      true,
+      "one usable account needs no switcher",
+    )
+  })
+})

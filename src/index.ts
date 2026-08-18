@@ -1000,13 +1000,40 @@ const plugin: PluginWithOptions = async (
             const currentAccounts = refreshAccountsList()
             const currentSource =
               loadPersistedAccountSource() ?? defaultAccountSource
-            if (currentAccounts.length <= 1) return []
+            // Count what can actually serve. Five entries of which four are
+            // logged out is not a choice worth presenting.
+            if (
+              currentAccounts.filter((a) => credentialState(a) !== "unusable")
+                .length <= 1
+            ) {
+              return []
+            }
             // Read once per open, not once per row.
             const quotaCache = readQuotaCache()
             // Values shown come from the cache; this refreshes it for the next
             // open. The getter cannot await, so it cannot show its own result.
             topUpQuota("switcher-open")
             const cfgNow = getConfig()
+
+            // An account holding no usable credentials is not a choice — it is
+            // an entry for a config directory nobody logs into. Offering it
+            // invites selecting an account that cannot answer, which is exactly
+            // how the default ~/.claude entry ended up looking like the active
+            // account. Kept if nothing else is usable, because an empty
+            // switcher would be worse than a hopeless one.
+            const usableAccounts = currentAccounts.filter(
+              (a) => credentialState(a) !== "unusable",
+            )
+            const selectableAccounts =
+              usableAccounts.length > 0 ? usableAccounts : currentAccounts
+            if (usableAccounts.length !== currentAccounts.length) {
+              log("switcher_hid_unusable", {
+                hidden: currentAccounts
+                  .filter((a) => credentialState(a) === "unusable")
+                  .map((a) => a.source),
+              })
+            }
+
             const autoRow: { label: string; value: string; hint?: string } = {
               label: `Auto — balance across accounts (${cfgNow.strategy})`,
               value: AUTO_SOURCE,
@@ -1044,7 +1071,7 @@ const plugin: PluginWithOptions = async (
                 options: [
                   ...presetRows,
                   autoRow,
-                  ...currentAccounts.map((a) => {
+                  ...selectableAccounts.map((a) => {
                     const option: {
                       label: string
                       value: string

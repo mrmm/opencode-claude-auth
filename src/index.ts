@@ -15,6 +15,8 @@ import {
   quotaForAccount,
   readQuotaCache,
   SESSION_HEADER,
+  credentialState,
+  pickStartupAccount,
   recordRequest,
   resolveSessionCredentials,
   refreshQuotas,
@@ -324,12 +326,22 @@ const plugin: PluginWithOptions = async (
    */
   function activeAccountLabel(): string {
     try {
+      // Ask which account is actually active rather than re-deriving it from
+      // the selection file. That file may hold `__auto__` or `preset:<name>`,
+      // neither of which is an account source, so matching it against the
+      // account list found nothing and fell through to the first entry — which
+      // here holds no access token. The label then advertised an account that
+      // could not serve a single request, while a different one served them all.
+      const active = getActiveAccount()
+      if (active) return active.label ?? ""
+
       const current = refreshAccountsList()
       const source = loadPersistedAccountSource() ?? defaultAccountSource
-      const active = source
-        ? (current.find((a) => a.source === source) ?? current[0])
-        : current[0]
-      return active?.label ?? ""
+      const fallback =
+        (source ? current.find((a) => a.source === source) : undefined) ??
+        current.find((a) => credentialState(a) !== "unusable") ??
+        current[0]
+      return fallback?.label ?? ""
     } catch {
       // A display nicety must never break auth.
       return ""
@@ -374,11 +386,20 @@ const plugin: PluginWithOptions = async (
       persistedSource?.startsWith(PRESET_PREFIX) === true ||
       getConfig().preset !== ""
     const autoMode = persistedSource === AUTO_SOURCE
+    // Never start on an account that cannot serve a request. accounts[0] is
+    // whatever the Keychain listed first, and here that is an entry holding no
+    // access token at all — starting there meant every init flipped the active
+    // account back to it, the label advertised it, and any request landing
+    // before the startup rotation had no credentials. That is the blank screen:
+    // observed as account_switch cccc3333 -> CCc immediately after a successful
+    // rotation, once per plugin init, and the plugin inits more than once.
+    const usable = accounts.filter((a) => credentialState(a) !== "unusable")
     const defaultAccount =
-      (!autoMode &&
-        persistedSource &&
-        accounts.find((a) => a.source === persistedSource)) ||
-      accounts[0]
+      pickStartupAccount(
+        accounts,
+        persistedSource,
+        (a) => credentialState(a) !== "unusable",
+      ) ?? accounts[0]
 
     setActiveAccountSource(defaultAccount.source)
 
@@ -388,6 +409,8 @@ const plugin: PluginWithOptions = async (
       activeSource: defaultAccount.source,
       autoMode,
       managedSelection,
+      usableAccounts: usable.length,
+      skippedUnusable: accounts.length - usable.length,
     })
 
     // With no pin, the first account is only a starting point — let the

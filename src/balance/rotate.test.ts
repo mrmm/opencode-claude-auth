@@ -2,7 +2,11 @@ import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
 import { DEFAULT_CONFIG, type ClaudeAuthConfig } from "../config.ts"
-import { credentialState, resolveActiveConfig } from "./rotate.ts"
+import {
+  credentialState,
+  pickStartupAccount,
+  resolveActiveConfig,
+} from "./rotate.ts"
 
 const cfg = (over: Partial<ClaudeAuthConfig> = {}): ClaudeAuthConfig => ({
   ...DEFAULT_CONFIG,
@@ -193,5 +197,58 @@ describe("selection changes are honoured regardless of autoSwitch", () => {
     assert.notEqual(key("preset:rr-12", ""), key("__auto__", ""))
     assert.notEqual(key(null, "rr-12"), key(null, "rr-23"))
     assert.equal(key("__auto__", "x"), key("__auto__", "x"))
+  })
+})
+
+const acct = (source: string) => ({ source })
+const usableAll = () => true
+
+describe("pickStartupAccount", () => {
+  it("skips a leading account that cannot serve", () => {
+    // The exact live shape: the Keychain's first entry holds no access token,
+    // and starting there put every init on a dead account.
+    const accounts = [acct("dead"), acct("good"), acct("also-good")]
+    const pick = pickStartupAccount(accounts, null, (a) => a.source !== "dead")
+    assert.equal(pick?.source, "good")
+  })
+
+  it("honours a pin that can serve", () => {
+    const accounts = [acct("dead"), acct("good"), acct("pinned")]
+    const pick = pickStartupAccount(
+      accounts,
+      "pinned",
+      (a) => a.source !== "dead",
+    )
+    assert.equal(pick?.source, "pinned")
+  })
+
+  it("ignores a pin to a dead account rather than failing every request", () => {
+    const accounts = [acct("dead"), acct("good")]
+    const pick = pickStartupAccount(
+      accounts,
+      "dead",
+      (a) => a.source !== "dead",
+    )
+    assert.equal(pick?.source, "good")
+  })
+
+  it("treats auto and preset selections as no pin at all", () => {
+    const accounts = [acct("dead"), acct("good")]
+    for (const sel of ["__auto__", "preset:rr-12"]) {
+      assert.equal(
+        pickStartupAccount(accounts, sel, (a) => a.source !== "dead")?.source,
+        "good",
+      )
+    }
+  })
+
+  it("falls back to the first account when none is usable", () => {
+    // Better to try and fail loudly than to hand back nothing at all.
+    const accounts = [acct("a"), acct("b")]
+    assert.equal(pickStartupAccount(accounts, null, () => false)?.source, "a")
+  })
+
+  it("returns nothing when there are no accounts", () => {
+    assert.equal(pickStartupAccount([], null, usableAll), undefined)
   })
 })

@@ -21,13 +21,16 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs"
-import { homedir, tmpdir } from "node:os"
+import { homedir } from "node:os"
 import { join } from "node:path"
 
 const SHARE = join(homedir(), ".local", "share", "opencode")
 const PLUGIN_LOG = join(SHARE, "claude-auth-debug.log")
 const OC_LOG = join(SHARE, "log", "opencode.log")
-const MARK = join(tmpdir(), "claude-auth-capture-mark.json")
+// Deliberately NOT os.tmpdir(): TMPDIR differs between shells, so a mark
+// written by one process was invisible to the next and `capture stop` reported
+// no mark at all. Alongside the logs it reads, it is found by everyone.
+const MARK = join(SHARE, "claude-auth-capture-mark.json")
 
 type Mark = { at: string; pluginBytes: number; ocBytes: number }
 
@@ -87,7 +90,7 @@ if (!existsSync(MARK)) {
 
 const mark = JSON.parse(readFileSync(MARK, "utf8")) as Mark
 const stamp = new Date().toISOString().replace(/[:.]/g, "-")
-const out = join(tmpdir(), `claude-auth-capture-${stamp}`)
+const out = join(SHARE, "captures", `claude-auth-capture-${stamp}`)
 mkdirSync(out, { recursive: true })
 
 const pluginSlice = tailSince(PLUGIN_LOG, mark.pluginBytes)

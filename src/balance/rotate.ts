@@ -44,6 +44,33 @@ import {
 import { currentUsageIndex, recordRotation } from "./usage.ts"
 
 /**
+ * Which account a fresh process should start on.
+ *
+ * Never one that cannot serve a request. The Keychain's first entry is not
+ * necessarily usable — here it is an entry holding no access token — and
+ * starting there put the plugin on a dead account until the first rotation,
+ * once per init, with the label advertising it the whole time.
+ *
+ * A pin is honoured only if it can actually serve; a pin to a dead account is a
+ * stale instruction, not a reason to fail every request.
+ */
+export function pickStartupAccount<T extends { source: string }>(
+  accounts: readonly T[],
+  persisted: string | null,
+  isUsable: (a: T) => boolean,
+): T | undefined {
+  if (accounts.length === 0) return undefined
+  const pinned =
+    persisted &&
+    persisted !== AUTO_SOURCE &&
+    !persisted.startsWith(PRESET_PREFIX)
+      ? accounts.find((a) => a.source === persisted)
+      : undefined
+  if (pinned && isUsable(pinned)) return pinned
+  return accounts.find((a) => isUsable(a)) ?? accounts[0]
+}
+
+/**
  * Fold the selected preset into the config.
  *
  * Precedence is deliberate: what you chose in the switcher beats `preset` in the

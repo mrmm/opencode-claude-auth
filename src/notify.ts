@@ -41,6 +41,10 @@ export type Notice =
       kind: "account-rotated"
       fromSource: string
       toSource: string
+      /** Human-readable label for fromSource, when available. */
+      fromLabel?: string
+      /** Human-readable label for toSource, when available. */
+      toLabel?: string
       /** Already human-readable, e.g. "at 96% of 5h". */
       reason: string
       pool: string

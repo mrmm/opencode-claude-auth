@@ -39,7 +39,8 @@ export type AdvisoryAccount = { source: string; label: string }
 
 /**
  * Drop the shared prefix so a toast reads as the part that distinguishes the
- * account: "Claude Team - Team A" -> "Team A - Team A". Labels that do not carry the prefix are left alone.
+ * account: "Claude Team - Pelico 1" -> "Pelico 1". Labels that do not carry
+ * the prefix are returned unchanged.
  */
 export function shortenLabel(label: string): string {
   return (
@@ -192,16 +193,22 @@ export function noticeToToast(
         message: `${shortenLabel(notice.failedSource)} could not be refreshed; using ${shortenLabel(notice.usedSource)} instead.`,
       }
 
-    case "account-rotated":
+    case "account-rotated": {
       // Always shown, regardless of showSuccess: this is the only thing on
       // screen that says which account is spending your quota now. The
       // provider/model label is applied once at config load and cannot be
       // rewritten mid-session, so without this the switch is invisible.
+      const fromName = shortenLabel(notice.fromLabel ?? notice.fromSource)
+      const toName = shortenLabel(notice.toLabel ?? notice.toSource)
+      // Show pool only when it is meaningful (not the implicit default pool).
+      const poolSuffix =
+        notice.pool && notice.pool !== "default" ? `, ${notice.pool}` : ""
       return {
         variant: "warning",
         title: "Claude account rotated",
-        message: `${shortenLabel(notice.fromSource)} ${notice.reason} — now on ${shortenLabel(notice.toSource)} (${notice.strategy}, ${notice.pool}).`,
+        message: `${fromName} ${notice.reason} — switched to ${toName} (${notice.strategy}${poolSuffix}).`,
       }
+    }
 
     case "selection-changed":
       // Always shown. The provider name in the status line is written once at

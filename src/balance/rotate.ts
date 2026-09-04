@@ -313,10 +313,14 @@ export function maybeRotate(
     })
 
     if (from) {
+      const fromLabel = accounts.find((a) => a.source === from)?.label
+      const toLabel = accounts.find((a) => a.source === decision.source)?.label
       emitNotice({
         kind: "account-rotated",
         fromSource: from,
         toSource: decision.source,
+        ...(fromLabel ? { fromLabel } : {}),
+        ...(toLabel ? { toLabel } : {}),
         reason: reasonForPrevious(from, trigger),
         pool: decision.pool,
         strategy: decision.strategy,
@@ -354,7 +358,8 @@ function reasonForPrevious(source: string, trigger: string): string {
             ? q.sevenDay
             : q.fiveHour
     if (!w) return "is spent"
-    return `hit ${Math.round(w.utilization * 100)}% of its ${cfg.switchWindow} limit`
+    const window = cfg.switchWindow === "binding" ? "quota" : cfg.switchWindow
+    return `hit ${Math.round(w.utilization * 100)}% of its ${window} limit`
   } catch {
     return "is spent"
   }

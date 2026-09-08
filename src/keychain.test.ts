@@ -956,10 +956,7 @@ attributes:
 
   it("maps a service to its comment", () => {
     const m = parseKeychainComments(DUMP)
-    assert.equal(
-      m.get("Claude Code-credentials-780bcd9b"),
-      "Team A",
-    )
+    assert.equal(m.get("Claude Code-credentials-780bcd9b"), "Team A")
   })
 
   it("omits <NULL> comments instead of labelling with them", () => {

@@ -1090,13 +1090,35 @@ const plugin: PluginWithOptions = async (
               })
             }
 
-            // Presets and Auto are deliberately NOT offered in this switcher.
-            // Every choice here ends in authorize(), and OpenCode disposes the
-            // whole instance ten milliseconds after a successful one — measured,
-            // session gone, screen blank. A preset needs none of that: it is a
-            // file write, which `pnpm lb <preset>` and claude_auth_select do
-            // without disturbing anything. Offering them here made the
-            // destructive path the obvious one.
+            const cfgNow = getConfig()
+
+            // Presets and Auto are offered here again. Every choice in this
+            // switcher ends in authorize(), after which OpenCode disposes the
+            // instance — but that is true of picking a plain account too, so
+            // withholding the load-balancing rows removed the only discoverable
+            // way to reach them without buying any safety. `pnpm lb <preset>`
+            // and claude_auth_select remain the non-disruptive route, and the
+            // prompt says so.
+            const presetRows = Object.entries(cfgNow.presets).map(
+              ([name, preset]) => {
+                const value = `${PRESET_PREFIX}${name}`
+                const count = preset.pools
+                  ? preset.pools.reduce((n, p) => n + p.accounts.length, 0)
+                  : (preset.accounts?.length ?? 0)
+                const row: { label: string; value: string; hint?: string } = {
+                  label: `LB · ${(preset.label ?? name).replace(/^LB\s+/i, "")} — ${preset.strategy ?? cfgNow.strategy} over ${count}`,
+                  value,
+                }
+                if (currentSource === value) row.hint = "active"
+                return row
+              },
+            )
+
+            const autoRow: { label: string; value: string; hint?: string } = {
+              label: `LB · Auto — balance across all accounts (${cfgNow.strategy})`,
+              value: AUTO_SOURCE,
+            }
+            if (currentSource === AUTO_SOURCE) autoRow.hint = "active"
 
             return [
               {
@@ -1109,18 +1131,22 @@ const plugin: PluginWithOptions = async (
                 // /provider/auth answers 500, the TUI falls back to its built-in
                 // "API key" prompt, and every account becomes unreachable. Omit
                 // the key instead of setting it to undefined.
-                options: selectableAccounts.map((a) => {
-                  const option: {
-                    label: string
-                    value: string
-                    hint?: string
-                  } = {
-                    label: prefixWithQuota(a.label, a.source, quotaCache),
-                    value: a.source,
-                  }
-                  if (a.source === currentSource) option.hint = "active"
-                  return option
-                }),
+                options: [
+                  ...presetRows,
+                  autoRow,
+                  ...selectableAccounts.map((a) => {
+                    const option: {
+                      label: string
+                      value: string
+                      hint?: string
+                    } = {
+                      label: prefixWithQuota(a.label, a.source, quotaCache),
+                      value: a.source,
+                    }
+                    if (a.source === currentSource) option.hint = "active"
+                    return option
+                  }),
+                ],
               },
             ]
           },

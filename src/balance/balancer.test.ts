@@ -495,18 +495,12 @@ describe("account references", () => {
         label: "Claude Team - Team B",
       },
     ]
-    assert.equal(
-      resolveRef("Team B", live),
-      "Claude Code-credentials-bbbb2222",
-    )
+    assert.equal(resolveRef("Team B", live), "Claude Code-credentials-bbbb2222")
     assert.equal(
       resolveRef("Claude Code-credentials-aaaa1111", live),
       "Claude Code-credentials-aaaa1111",
     )
-    assert.equal(
-      resolveRef("team a", live),
-      "Claude Code-credentials-aaaa1111",
-    )
+    assert.equal(resolveRef("team a", live), "Claude Code-credentials-aaaa1111")
   })
 
   it("refuses an ambiguous fragment rather than guessing", () => {

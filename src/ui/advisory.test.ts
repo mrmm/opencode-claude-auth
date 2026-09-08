@@ -47,10 +47,7 @@ function q(
 
 describe("shortenLabel", () => {
   it("drops the shared plan prefix", () => {
-    assert.equal(
-      shortenLabel("Claude Team - Team A"),
-      "Team A",
-    )
+    assert.equal(shortenLabel("Claude Team - Team A"), "Team A")
     assert.equal(shortenLabel("Claude Max - Personal"), "Personal")
   })
 
